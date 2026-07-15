@@ -19,7 +19,9 @@ while IFS= read -r local; do
   remote="${local#pi}"
 
   # Diff against the live file. `|| true` because diff exits 1 when files differ.
-  d=$(ssh -o BatchMode=yes "$HOST" "cat '$remote' 2>/dev/null" | diff -u --label "PI:$remote" - --label "REPO:$remote" "$local" || true)
+  # -n is load-bearing: without it ssh drains the loop's stdin and we silently
+  # process only the first file.
+  d=$(ssh -n -o BatchMode=yes "$HOST" "cat '$remote' 2>/dev/null" | diff -u --label "PI:$remote" - --label "REPO:$remote" "$local" || true)
 
   if [[ -z "$d" ]]; then
     echo "  same    $remote"
