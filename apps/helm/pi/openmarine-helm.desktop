@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=openMarine Helm
+Comment=Full-screen helm MFD (plotter, instruments, stereo)
+Exec=/home/pi/helm-launch.sh
+Icon=/home/pi/.signalk/node_modules/openmarine-helm/public/assets/icon.svg
+Terminal=false
+Categories=Utility;

@@ -31,10 +31,12 @@ function layoutFor(tabId) {
       instruments: { top: 0, left: 0, width: 68, height: 100 },
       stereo: { top: 0, left: 68, width: 32, height: 100 },
     }
+    // 1920x720 is very wide and short — split horizontally so nothing loses
+    // vertical room. Three full-height columns side by side.
     case 'all': return {
-      plotter: { top: 0, left: 0, width: 60, height: 100 },
-      instruments: { top: 0, left: 60, width: 40, height: 55 },
-      stereo: { top: 55, left: 60, width: 40, height: 45 },
+      plotter: { top: 0, left: 0, width: 46, height: 100 },
+      instruments: { top: 0, left: 46, width: 32, height: 100 },
+      stereo: { top: 0, left: 78, width: 22, height: 100 },
     }
     default: return {}
   }
@@ -60,8 +62,13 @@ function Surface({ rect, children }) {
   )
 }
 
+const validTab = (id) => (TABS.some((t) => t.id === id) ? id : 'plotter')
+
 export default function App() {
-  const [tab, setTab] = useState('plotter')
+  // Initial tab from the URL hash (e.g. #all), so a view is deep-linkable and the
+  // boot kiosk can open straight into a chosen page.
+  const [tab, setTabState] = useState(() => validTab(location.hash.replace('#', '')))
+  const setTab = (id) => { setTabState(id); history.replaceState(null, '', `#${id}`) }
   const sk = useSignalKStatus()
   const L = layoutFor(tab)
 
@@ -71,7 +78,7 @@ export default function App() {
       <Stack direction="row" alignItems="center" sx={{ bgcolor: 'background.paper', borderBottom: '1px solid rgba(255,255,255,0.12)' }}>
         <Tabs
           value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" scrollButtons={false}
-          sx={{ flex: 1, minHeight: 60, '& .MuiTab-root': { minHeight: 60, fontSize: '1.05rem', fontWeight: 700 } }}
+          sx={{ flex: 1, minHeight: 52, '& .MuiTab-root': { minHeight: 52, py: 0, fontSize: '1.02rem', fontWeight: 700 } }}
         >
           {TABS.map((t) => <Tab key={t.id} value={t.id} label={t.label} />)}
         </Tabs>
