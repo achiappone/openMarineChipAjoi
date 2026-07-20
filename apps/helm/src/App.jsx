@@ -27,16 +27,17 @@ function layoutFor(tabId) {
     case 'plotter': return { plotter: FULL }
     case 'instruments': return { instruments: FULL }
     case 'stereo': return { stereo: FULL }
+    // Gauge on top, FM stereo stacked below (the compact stereo panel fits the
+    // bottom band on the 720px screen).
     case 'instr-stereo': return {
-      instruments: { top: 0, left: 0, width: 68, height: 100 },
-      stereo: { top: 0, left: 68, width: 32, height: 100 },
+      instruments: { top: 0, left: 0, width: 100, height: 52 },
+      stereo: { top: 52, left: 0, width: 100, height: 48 },
     }
-    // 1920x720 is very wide and short — split horizontally so nothing loses
-    // vertical room. Three full-height columns side by side.
+    // Plotter on the left; instruments over stereo stacked on the right.
     case 'all': return {
-      plotter: { top: 0, left: 0, width: 46, height: 100 },
-      instruments: { top: 0, left: 46, width: 32, height: 100 },
-      stereo: { top: 0, left: 78, width: 22, height: 100 },
+      plotter: { top: 0, left: 0, width: 55, height: 100 },
+      instruments: { top: 0, left: 55, width: 45, height: 52 },
+      stereo: { top: 52, left: 55, width: 45, height: 48 },
     }
     default: return {}
   }
