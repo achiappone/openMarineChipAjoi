@@ -1,34 +1,43 @@
 # apps/
 
 Code that **runs on the Pi** (SignalK plugins, webapps, standalone services).
-Deployed with `scripts/dev.sh`, not `deploy.sh` (that one is for `/boot` + `/etc`
-config files).
+Deployed with **Ansible**, driven by npm scripts — the same pattern as the
+WELLCOM_SERVER project.
 
-Each app is a folder here with a `deploy.env` describing where it lands on the
-Pi and how to activate it:
+System config files (`/boot`, `/etc`) still go through `scripts/deploy.sh`; this
+directory is for things that *run* on the Pi.
+
+## How it works
+
+- `ansible/hosts` — the Pi inventory (uses the `openplotter` ssh alias).
+- `ansible/config.yml` — the declarative manifest: one entry per app under
+  `apps:`, saying where it lands on the Pi and how to install / run / restart it.
+- `ansible/deploy_app.yml` — rsyncs `apps/<app>/` to the Pi, installs deps
+  **on the Pi** (node 18, native modules build there), then runs/activates.
+
+## Deploy an app
 
 ```sh
-REMOTE_DIR="/home/pi/apps/<name>"      # required
-INSTALL="npm install --omit=dev"       # optional: run in REMOTE_DIR after sync
-RUN="node index.js"                    # optional: activate the new code
-LOGS="journalctl -u signalk -n 60 -f"  # optional: follow output
+npm run deploy:health            # deploy the pi-health scaffold
+npm run deploy:app -- -e app=<name>   # deploy any app declared in config.yml
+npm run ping                     # ansible connectivity check
 ```
 
-Workflow:
+## Add a new app
 
-```sh
-./scripts/dev.sh <name>          # dry run — see what would change
-./scripts/dev.sh <name> --push   # sync files only
-./scripts/dev.sh <name> --run    # sync + install + run/restart
-./scripts/dev.sh <name> --logs   # tail its logs
+1. Put the code in `apps/<name>/`.
+2. Add an entry under `apps:` in `ansible/config.yml`:
+
+```yaml
+apps:
+  my-plugin:
+    remote: "{{ signalk_home }}/node_modules/my-plugin"
+    install: "npm install --omit=dev"
+    run: "systemctl restart signalk"
+    become: true          # systemctl needs sudo
 ```
 
-Dependencies install **on the Pi** (node 18, native modules must build there),
-so `node_modules` is never synced from the Mac.
+3. `npm run deploy:app -- -e app=my-plugin`.
 
-## Deploy targets by app type
-
-- **Standalone script/service** → `REMOTE_DIR=/home/pi/apps/<name>`, `RUN="node index.js"`.
-- **SignalK plugin** → `REMOTE_DIR=/home/pi/.signalk/node_modules/<name>`,
-  `INSTALL="npm install --omit=dev"`, `RUN="sudo systemctl restart signalk"`.
-  Then enable it in the SignalK admin UI (Server → Plugin Config).
+Dependencies never sync from the Mac (`node_modules` is excluded) — they install
+on the Pi where they'll actually run.

@@ -1,0 +1,16 @@
+{
+  "name": "openmarine-boat-config",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Config + deploy tooling for the boat's OpenPlotter Pi (openMarine)",
+  "scripts": {
+    "start": "ssh -t openplotter",
+    "ssh": "ssh -t openplotter",
+    "ping": "ANSIBLE_CONFIG=ansible/ansible.cfg ansible -i ansible/hosts pi -m ping",
+    "deploy:app": "ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook -i ansible/hosts ansible/deploy_app.yml",
+    "deploy:health": "ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook -i ansible/hosts ansible/deploy_app.yml -e app=pi-health"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

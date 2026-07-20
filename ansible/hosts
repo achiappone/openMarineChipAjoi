@@ -1,0 +1,6 @@
+# Inventory for the boat Pi.
+# Uses the `openplotter` ssh alias from ~/.ssh/config (HostName openplotter.local,
+# User pi, IdentityFile ~/.ssh/id_rsa_pi) so all connection details live in one
+# place and Ansible inherits the same key + host key we already trust.
+[pi]
+openplotter ansible_python_interpreter=/usr/bin/python3

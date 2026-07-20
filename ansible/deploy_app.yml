@@ -1,0 +1,54 @@
+---
+# Generic app deploy: rsync apps/<app>/ to the Pi, install deps, run/activate.
+# Deps install ON the Pi (its node is v18, native modules must build there).
+#
+#   ansible-playbook -i ansible/hosts ansible/deploy_app.yml -e app=pi-health
+#   npm run deploy:app -- -e app=pi-health
+- hosts: pi
+  gather_facts: no
+  vars_files:
+    - config.yml
+  vars:
+    cfg: "{{ apps[app] | default({}) }}"
+    dest: "{{ cfg.remote | default(remote_apps_path + '/' + app) }}"
+  tasks:
+    - name: Require a known app
+      ansible.builtin.assert:
+        that: "app is defined and app in apps"
+        fail_msg: "Pass -e app=<name>. Known apps: {{ apps.keys() | list }}"
+
+    - name: "Ensure {{ dest }} exists"
+      ansible.builtin.file:
+        path: "{{ dest }}"
+        state: directory
+        mode: "0755"
+
+    - name: "Sync apps/{{ app }}/ -> {{ dest }}"
+      ansible.posix.synchronize:
+        src: "{{ local_base_path }}/apps/{{ app }}/"
+        dest: "{{ dest }}/"
+        delete: yes
+        rsync_opts:
+          - "--exclude=node_modules"
+          - "--exclude=.git"
+          - "--exclude=.DS_Store"
+
+    - name: Install deps on the Pi
+      ansible.builtin.shell: "{{ cfg.install }}"
+      args:
+        chdir: "{{ dest }}"
+      become: "{{ cfg.become | default(false) }}"
+      when: cfg.install is defined
+
+    - name: Run / activate
+      ansible.builtin.shell: "{{ cfg.run }}"
+      args:
+        chdir: "{{ dest }}"
+      become: "{{ cfg.become | default(false) }}"
+      register: run_out
+      when: cfg.run is defined
+
+    - name: Output
+      ansible.builtin.debug:
+        var: run_out.stdout_lines
+      when: run_out is defined and run_out.stdout_lines is defined

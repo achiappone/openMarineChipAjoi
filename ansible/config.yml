@@ -1,0 +1,24 @@
+# config.yml — variables for the openMarine deploy playbooks.
+# The single declarative source of truth for what gets pushed to the Pi.
+# (Same role config.yml plays in the WELLCOM_SERVER project.)
+
+local_base_path: /Users/anthonychiappone/boat-config
+remote_apps_path: /home/pi/apps
+signalk_home: /home/pi/.signalk
+
+# One entry per app under apps/<name>/. deploy_app.yml reads this to know where
+# each app lands on the Pi and how to install / run / restart it.
+#   remote   (optional) target dir on the Pi   (default: {{ remote_apps_path }}/<name>)
+#   install  (optional) shell run in the remote dir after sync (deps build on the Pi)
+#   run      (optional) shell to activate the code
+#   become   (optional) true if install/run need sudo (e.g. systemctl)
+apps:
+  pi-health:
+    run: "node /home/pi/apps/pi-health/index.js"
+
+  # Template — a SignalK plugin lands in node_modules and restarts the server:
+  # my-plugin:
+  #   remote: "{{ signalk_home }}/node_modules/my-plugin"
+  #   install: "npm install --omit=dev"
+  #   run: "systemctl restart signalk"
+  #   become: true
