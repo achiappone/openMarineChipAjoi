@@ -1,0 +1,44 @@
+---
+# Deploy the openMarine Helm webapp.
+# Builds on the Mac (Vite), then ships only what SignalK needs to serve a webapp:
+# package.json (with the signalk-webapp keyword) + the built public/ folder, into
+# the user webapp location ~/.signalk/node_modules/. Restart makes SignalK rescan.
+#
+#   ansible-playbook -i ansible/hosts ansible/deploy_helm.yml
+#   npm run deploy:helm
+- hosts: pi
+  gather_facts: no
+  vars_files:
+    - config.yml
+  vars:
+    app_src: "{{ local_base_path }}/apps/helm"
+    dest: "{{ signalk_home }}/node_modules/openmarine-helm"
+  tasks:
+    - name: Build the helm webapp on the Mac
+      delegate_to: localhost
+      ansible.builtin.command:
+        cmd: npm run build
+        chdir: "{{ app_src }}"
+
+    - name: "Ensure {{ dest }} exists"
+      ansible.builtin.file:
+        path: "{{ dest }}"
+        state: directory
+        mode: "0755"
+
+    - name: Ship package.json
+      ansible.posix.synchronize:
+        src: "{{ app_src }}/package.json"
+        dest: "{{ dest }}/package.json"
+
+    - name: Ship the built public/ (prune stale assets)
+      ansible.posix.synchronize:
+        src: "{{ app_src }}/public/"
+        dest: "{{ dest }}/public/"
+        delete: yes
+
+    - name: Restart SignalK so it picks up the webapp
+      ansible.builtin.systemd_service:
+        name: signalk
+        state: restarted
+      become: yes

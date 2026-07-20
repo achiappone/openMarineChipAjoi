@@ -1,0 +1,31 @@
+{
+  "name": "openmarine-helm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Full-screen helm MFD for the boat: plotter, instruments, and stereo as selectable views",
+  "keywords": [
+    "signalk-webapp",
+    "signalk"
+  ],
+  "signalk": {
+    "appIcon": "assets/icon.svg",
+    "displayName": "openMarine Helm"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@emotion/react": "^11.13.3",
+    "@emotion/styled": "^11.13.0",
+    "@mui/icons-material": "^6.1.6",
+    "@mui/material": "^6.1.6",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.3",
+    "vite": "^6.0.1"
+  }
+}
