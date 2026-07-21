@@ -154,9 +154,9 @@ function applyVolume() {
 // US stations scroll ad/song text through the 8-char PS field, so a single PS frame
 // is a fragment ("rneys.7"). Keep the frame that recurs as a stable station name
 // (title), and reassemble the scrolling segments into a full message (artist).
-let psFreq = {}, psBuilding = [], psComplete = '', rtText = ''
+let psFreq = {}, psBuilding = [], psComplete = '', rtText = '', ptyFreq = {}
 function rdsMessage() { return rtText || psComplete || psBuilding.join(' ') }
-function resetRds() { psFreq = {}; psBuilding = []; psComplete = ''; rtText = ''; rdsBuf = '' }
+function resetRds() { psFreq = {}; psBuilding = []; psComplete = ''; rtText = ''; ptyFreq = {}; rdsBuf = '' }
 function notePs(raw) {
   const t = String(raw).replace(/\s+/g, ' ').trim()
   if (!t) return
@@ -185,7 +185,12 @@ function parseRds(d) {
       const j = JSON.parse(line)
       if (j.ps) notePs(j.ps)
       if (j.radiotext && j.radiotext.trim()) { rtText = j.radiotext.trim(); state.nowPlaying.artist = rdsMessage() }
-      if (j.prog_type && j.prog_type !== 'None') { state.nowPlaying.pty = j.prog_type; updatePresetInfo() }
+      if (j.prog_type && j.prog_type !== 'None') {
+        ptyFreq[j.prog_type] = (ptyFreq[j.prog_type] || 0) + 1
+        let best = null, n = 2 // need >=3 consistent hits so a single glitched frame can't stick
+        for (const k in ptyFreq) if (ptyFreq[k] > n) { n = ptyFreq[k]; best = k }
+        if (best) { state.nowPlaying.pty = best; updatePresetInfo() }
+      }
     } catch (e) {}
   }
 }
