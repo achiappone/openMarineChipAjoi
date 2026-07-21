@@ -79,7 +79,7 @@ export default function App() {
       <Box sx={{ position: 'relative', flex: 1 }}>
         <Surface rect={L.plotter}><EmbeddedApp src={FREEBOARD} title="Plotter (Freeboard-SK)" /></Surface>
         <Surface rect={L.instruments}><EmbeddedApp src={KIP} title="Instruments (KIP)" /></Surface>
-        <Surface rect={L.stereo}><StereoView /></Surface>
+        <Surface rect={L.stereo}><StereoView big={tab === 'stereo'} /></Surface>
       </Box>
 
       {/* Page buttons — bottom bar, right-aligned */}
