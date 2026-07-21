@@ -237,14 +237,18 @@ export default function StereoView({ big = false }) {
 
   const header = (
     <Stack direction="row" alignItems="center" spacing={big ? 1.5 : 1}>
-      <Typography variant={big ? 'h4' : 'h6'} sx={{ fontWeight: 800, flex: 1 }}>Stereo</Typography>
+      <Typography variant={big ? 'h4' : 'h6'} sx={{ fontWeight: 800 }}>Stereo</Typography>
+      {/* Big emergency mute, centered */}
+      <Box sx={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
+        <Button onClick={() => c.toggleMute()} variant={s.muted ? 'contained' : 'outlined'}
+          color={s.muted ? 'error' : 'inherit'} startIcon={s.muted ? <VolumeOffIcon /> : <VolumeUpIcon />}
+          sx={{ minWidth: big ? 360 : 180, py: big ? 1.6 : 0.8, fontSize: big ? '1.6rem' : '1rem', fontWeight: 800,
+            borderWidth: 2, borderColor: s.muted ? 'error.main' : 'rgba(255,255,255,0.35)', '&:hover': { borderWidth: 2 } }}>
+          {s.muted ? 'MUTED' : 'MUTE'}
+        </Button>
+      </Box>
       <Chip size={big ? 'medium' : 'small'} color={s.connected ? 'success' : 'warning'}
         label={s.connected ? 'RTL-SDR' : 'no service'} />
-      <IconButton size={big ? 'large' : 'small'} onClick={() => c.toggleMute()} title="Mute"
-        sx={{ border: '2px solid', borderColor: s.muted ? 'error.main' : 'rgba(255,255,255,0.25)', borderRadius: 2,
-          color: s.muted ? 'error.main' : 'inherit' }}>
-        {s.muted ? <VolumeOffIcon fontSize={big ? 'medium' : 'small'} /> : <VolumeUpIcon fontSize={big ? 'medium' : 'small'} />}
-      </IconButton>
       <IconButton size={big ? 'large' : 'small'} onClick={() => setSettingsOpen(true)} title="FM tuner settings">
         <SettingsIcon fontSize={big ? 'medium' : 'small'} />
       </IconButton>
