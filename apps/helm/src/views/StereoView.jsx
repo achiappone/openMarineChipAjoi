@@ -221,6 +221,11 @@ export default function StereoView({ big = false }) {
       <Typography variant={big ? 'h4' : 'h6'} sx={{ fontWeight: 800, flex: 1 }}>Stereo</Typography>
       <Chip size={big ? 'medium' : 'small'} color={s.connected ? 'success' : 'warning'}
         label={s.connected ? 'RTL-SDR' : 'no service'} />
+      <IconButton size={big ? 'large' : 'small'} onClick={() => c.toggleMute()} title="Mute"
+        sx={{ border: '2px solid', borderColor: s.muted ? 'error.main' : 'rgba(255,255,255,0.25)', borderRadius: 2,
+          color: s.muted ? 'error.main' : 'inherit' }}>
+        {s.muted ? <VolumeOffIcon fontSize={big ? 'medium' : 'small'} /> : <VolumeUpIcon fontSize={big ? 'medium' : 'small'} />}
+      </IconButton>
       <IconButton size={big ? 'large' : 'small'} onClick={() => setSettingsOpen(true)} title="FM tuner settings">
         <SettingsIcon fontSize={big ? 'medium' : 'small'} />
       </IconButton>
@@ -344,14 +349,32 @@ export default function StereoView({ big = false }) {
   const isFM = s.source === 'FM'
   const bt = s.bluetooth || {}
   const btNowPlaying = (
-    <Box sx={{ textAlign: 'center', py: big ? 4 : 2 }}>
-      <BluetoothIcon sx={{ fontSize: big ? 72 : 40, color: bt.connected ? 'primary.light' : 'text.disabled' }} />
-      <Typography noWrap sx={{ fontWeight: 800, fontSize: big ? '2.4rem' : '1.2rem', mt: 1 }}>
-        {bt.track?.title || (bt.connected ? bt.connected.name : 'Bluetooth')}
-      </Typography>
-      <Typography noWrap sx={{ opacity: 0.75, fontSize: big ? '1.4rem' : '0.9rem' }}>
-        {bt.track?.artist || (bt.connected ? 'Streaming' : 'No device connected')}
-      </Typography>
+    <Box sx={{ textAlign: 'center' }}>
+      <Stack direction="row" alignItems="center" justifyContent="center" spacing={1} sx={{ mb: 1.5 }}>
+        <BluetoothIcon sx={{ fontSize: big ? 30 : 20, color: bt.connected ? 'primary.light' : 'text.disabled' }} />
+        <Typography sx={{ opacity: 0.75, fontSize: big ? '1.1rem' : '0.85rem' }}>
+          {bt.connected ? bt.connected.name : 'No device connected'}
+        </Typography>
+      </Stack>
+      {bt.track ? (
+        <Box sx={{ bgcolor: 'rgba(57,160,255,0.12)', border: '1px solid rgba(57,160,255,0.4)', borderRadius: 2, p: big ? 2.5 : 1.5 }}>
+          <Typography noWrap sx={{ fontWeight: 800, color: '#fff', lineHeight: 1.1, fontSize: big ? '2.6rem' : '1.3rem' }}>
+            {bt.track.title || '—'}
+          </Typography>
+          {bt.track.artist && (
+            <Typography noWrap sx={{ color: 'primary.light', fontWeight: 700, mt: 0.5, fontSize: big ? '1.7rem' : '1rem' }}>
+              {bt.track.artist}
+            </Typography>
+          )}
+          {bt.track.album && (
+            <Typography noWrap sx={{ opacity: 0.7, fontSize: big ? '1.2rem' : '0.85rem', mt: 0.25 }}>{bt.track.album}</Typography>
+          )}
+        </Box>
+      ) : (
+        <Typography sx={{ opacity: 0.6, fontSize: big ? '1.5rem' : '1rem', py: big ? 4 : 2 }}>
+          {bt.connected ? 'Play something on your phone' : 'Tap "Pair New Phone"'}
+        </Typography>
+      )}
     </Box>
   )
   const auxMain = (

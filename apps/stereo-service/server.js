@@ -233,7 +233,32 @@ function btScan() {
     state.bluetooth.connected = connected
   } catch (e) { state.bluetooth.available = true }
 }
-setInterval(() => { if (state.source === 'Bluetooth' || state.bluetooth.pairing) btScan() }, 4000)
+// AVRCP track metadata from BlueZ's system D-Bus (no extra deps).
+let btPlayerPath = ''
+function btField(out, key) {
+  const m = new RegExp('"' + key + '" s "((?:\\\\.|[^"\\\\])*)"').exec(out)
+  return m ? m[1].replace(/\\(.)/g, '$1') : ''
+}
+function btTrack() {
+  if (!state.bluetooth.connected) { state.bluetooth.track = null; btPlayerPath = ''; return }
+  if (!btPlayerPath) {
+    const dev = 'dev_' + state.bluetooth.connected.mac.replace(/:/g, '_')
+    try {
+      const tree = execSync('busctl --system tree org.bluez 2>/dev/null', { encoding: 'utf8' })
+      const m = tree.match(new RegExp('/org/bluez/hci[0-9]+/' + dev + '/player[0-9]+'))
+      btPlayerPath = m ? m[0] : ''
+    } catch (e) { btPlayerPath = '' }
+  }
+  if (!btPlayerPath) { state.bluetooth.track = null; return }
+  try {
+    const out = execSync(`busctl --system get-property org.bluez ${btPlayerPath} org.bluez.MediaPlayer1 Track 2>/dev/null`, { encoding: 'utf8' })
+    const title = btField(out, 'Title'), artist = btField(out, 'Artist'), album = btField(out, 'Album')
+    let status = ''
+    try { status = execSync(`busctl --system get-property org.bluez ${btPlayerPath} org.bluez.MediaPlayer1 Status 2>/dev/null`, { encoding: 'utf8' }).replace(/.*"(.*)".*/, '$1').trim() } catch (e) {}
+    state.bluetooth.track = (title || artist) ? { title, artist, album, status } : null
+  } catch (e) { btPlayerPath = ''; state.bluetooth.track = null }
+}
+setInterval(() => { if (state.source === 'Bluetooth' || state.bluetooth.pairing) { btScan(); btTrack() } }, 3000)
 
 const clampFm = (f) => { f = Math.round(f * 10) / 10; if (f > 107.9) return 87.5; if (f < 87.5) return 107.9; return f }
 
@@ -270,6 +295,7 @@ const actions = {
   },
   btConnect: (b) => { if (b.mac) { btWrite(`connect ${b.mac}`); setTimeout(btScan, 2500) } },
   btDisconnect: () => { if (state.bluetooth.connected) { btWrite(`disconnect ${state.bluetooth.connected.mac}`); setTimeout(btScan, 1500) } },
+  btCancelPair: () => { btWrite('discoverable off'); state.bluetooth.pairing = false; clearTimeout(btPairTimer) },
 }
 
 // ---- HTTP + SSE ----
