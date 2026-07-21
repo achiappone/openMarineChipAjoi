@@ -369,12 +369,6 @@ export default function StereoView({ big = false }) {
   }
   const btNowPlaying = (
     <Box sx={{ textAlign: 'center' }}>
-      <Stack direction="row" alignItems="center" justifyContent="center" spacing={1} sx={{ mb: 1.5 }}>
-        <BluetoothIcon sx={{ fontSize: big ? 30 : 20, color: bt.connected ? 'primary.light' : 'text.disabled' }} />
-        <Typography sx={{ opacity: 0.75, fontSize: big ? '1.1rem' : '0.85rem' }}>
-          {bt.connected ? bt.connected.name : 'No device connected'}
-        </Typography>
-      </Stack>
       {bt.track ? (
         <Stack direction="row" spacing={big ? 3 : 1.5} alignItems="center"
           sx={{ bgcolor: 'rgba(57,160,255,0.12)', border: '1px solid rgba(57,160,255,0.4)', borderRadius: 2, p: big ? 2.5 : 1.5 }}>
