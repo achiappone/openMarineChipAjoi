@@ -75,14 +75,15 @@ export default function App() {
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      {/* Tab / page buttons */}
-      <Stack direction="row" alignItems="center" sx={{ bgcolor: 'background.paper', borderBottom: '1px solid rgba(255,255,255,0.12)' }}>
-        <Tabs
-          value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" scrollButtons={false}
-          sx={{ flex: 1, minHeight: 52, '& .MuiTab-root': { minHeight: 52, py: 0, fontSize: '1.02rem', fontWeight: 700 } }}
-        >
-          {TABS.map((t) => <Tab key={t.id} value={t.id} label={t.label} />)}
-        </Tabs>
+      {/* Surfaces — all mounted, positioned per tab */}
+      <Box sx={{ position: 'relative', flex: 1 }}>
+        <Surface rect={L.plotter}><EmbeddedApp src={FREEBOARD} title="Plotter (Freeboard-SK)" /></Surface>
+        <Surface rect={L.instruments}><EmbeddedApp src={KIP} title="Instruments (KIP)" /></Surface>
+        <Surface rect={L.stereo}><StereoView /></Surface>
+      </Box>
+
+      {/* Page buttons — bottom bar, right-aligned */}
+      <Stack direction="row" alignItems="center" sx={{ bgcolor: 'background.paper', borderTop: '1px solid rgba(255,255,255,0.12)' }}>
         <Chip
           size="small"
           color={sk.connected ? (sk.deltas > 0 ? 'success' : 'info') : 'default'}
@@ -90,14 +91,14 @@ export default function App() {
           label={sk.connected ? (sk.deltas > 0 ? 'SK · live data' : 'SK · connected') : 'SK · offline'}
           sx={{ mx: 2 }}
         />
+        <Box sx={{ flex: 1 }} />
+        <Tabs
+          value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" scrollButtons={false}
+          sx={{ minHeight: 52, '& .MuiTab-root': { minHeight: 52, py: 0, fontSize: '1.02rem', fontWeight: 700 } }}
+        >
+          {TABS.map((t) => <Tab key={t.id} value={t.id} label={t.label} />)}
+        </Tabs>
       </Stack>
-
-      {/* Surfaces — all mounted, positioned per tab */}
-      <Box sx={{ position: 'relative', flex: 1 }}>
-        <Surface rect={L.plotter}><EmbeddedApp src={FREEBOARD} title="Plotter (Freeboard-SK)" /></Surface>
-        <Surface rect={L.instruments}><EmbeddedApp src={KIP} title="Instruments (KIP)" /></Surface>
-        <Surface rect={L.stereo}><StereoView /></Surface>
-      </Box>
     </Box>
   )
 }
