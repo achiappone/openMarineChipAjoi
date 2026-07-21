@@ -151,7 +151,7 @@ function NavCard({ onClick, big, children }) {
   )
 }
 
-function SettingsDialog({ open, onClose, settings, onChange }) {
+export function SettingsDialog({ open, onClose, settings, onChange }) {
   const st = settings || {}
   const auto = st.gain < 0
   // Local slider state so dragging stays smooth; only commit (which restarts the

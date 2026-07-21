@@ -243,6 +243,32 @@ function scheduleStart() {
 }
 function stopRadio() { clearTimeout(restartTimer); killPipeline(); state.nowPlaying = { title: 'FM Radio', artist: '', pty: '' } }
 
+// ---- Non-FM spectrum: tap the PipeWire output-sink monitor so the visualizer
+// reacts to Bluetooth/Aux audio too. FM keeps its own tap on the sox stream (it
+// plays via aplay, bypassing PipeWire), so the two never feed the FFT at once. ----
+const MONITOR_SRC = process.env.MONITOR_SRC || 'alsa_output.platform-bcm2835_audio.3.stereo-fallback.monitor'
+let monProc = null
+function startMonitorTap() {
+  if (monProc) return
+  try {
+    monProc = spawn('parec', ['--device=' + MONITOR_SRC, '--format=s16le', '--rate=' + RATE, '--channels=1'],
+      { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || '/run/user/1000' } })
+    monProc.stdout.on('data', pushAudio)
+    monProc.on('error', () => {})
+    monProc.on('exit', () => { monProc = null })
+  } catch (e) { monProc = null }
+}
+function stopMonitorTap() {
+  if (monProc) { try { monProc.kill('SIGTERM') } catch (e) {} monProc = null }
+  try { execSync('pkill -x parec; true', { stdio: 'ignore' }) } catch (e) {}
+}
+// Start/stop the monitor tap to match the current source: on for non-FM while
+// powered, off (and spectrum cleared) otherwise.
+function applyAudioTaps() {
+  if (state.power && state.source !== 'FM') startMonitorTap()
+  else { stopMonitorTap(); if (state.source !== 'FM') clearSpectrum() }
+}
+
 // ---- Bluetooth (A2DP sink via BlueZ; PipeWire routes the audio) ----
 let btctl = null, btPairTimer = null
 function btEnsureAgent() {
@@ -376,7 +402,7 @@ function btPlayerCmd(method) {
 const clampFm = (f) => { f = Math.round(f * 10) / 10; if (f > 107.9) return 87.5; if (f < 87.5) return 107.9; return f }
 
 const actions = {
-  power: (b) => { state.power = !!b.on; state.power ? scheduleStart() : stopRadio() },
+  power: (b) => { state.power = !!b.on; state.power ? scheduleStart() : stopRadio(); applyAudioTaps() },
   source: (b) => {
     const prev = state.source
     if (b.source) state.source = b.source
@@ -384,6 +410,7 @@ const actions = {
     // Leaving Bluetooth -> pause the phone so it doesn't keep streaming into the aux.
     if (prev === 'Bluetooth' && state.source !== 'Bluetooth' && state.bluetooth.track && state.bluetooth.track.status === 'playing') btPlayerCmd('Pause')
     scheduleStart()
+    applyAudioTaps()
   },
   tune: (b) => { state.fm.freq = clampFm(Number(b.freq)); if (state.power) scheduleStart() },
   seek: (b) => { state.fm.freq = clampFm(state.fm.freq + (b.dir > 0 ? 0.2 : -0.2)); if (state.power) scheduleStart() },
@@ -472,7 +499,7 @@ setInterval(() => {
 
 killPipeline()
 // Resume persisted state so a deploy/restart doesn't turn the stereo off.
-setTimeout(() => { state.power = true; applyVolume(); if (state.source === 'FM') scheduleStart() }, 800)
+setTimeout(() => { state.power = true; applyVolume(); if (state.source === 'FM') scheduleStart(); applyAudioTaps() }, 800)
 server.listen(PORT, () => console.log('stereo-service listening on', PORT))
 process.on('SIGTERM', () => { stopRadio(); process.exit(0) })
 process.on('SIGINT', () => { stopRadio(); process.exit(0) })
