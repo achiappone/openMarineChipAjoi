@@ -58,6 +58,9 @@ export function createRadioClient(onChange) {
     savePreset: (freq) => post('savePreset', freq != null ? { freq } : {}),
     removePreset: (i) => post('removePreset', { i }),
     setSettings: (patch) => post('settings', patch),
+    btPair: () => post('btPair', {}),
+    btConnect: (mac) => post('btConnect', { mac }),
+    btDisconnect: () => post('btDisconnect', {}),
     stop: () => clearInterval(poll),
   }
 }

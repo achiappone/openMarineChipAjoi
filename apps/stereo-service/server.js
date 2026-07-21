@@ -203,6 +203,38 @@ function scheduleStart() {
 }
 function stopRadio() { clearTimeout(restartTimer); killPipeline(); state.nowPlaying = { title: 'FM Radio', artist: '' } }
 
+// ---- Bluetooth (A2DP sink via BlueZ; PipeWire routes the audio) ----
+let btctl = null, btPairTimer = null
+function btEnsureAgent() {
+  if (btctl && btctl.exitCode === null) return
+  btctl = spawn('bluetoothctl', [], { stdio: ['pipe', 'ignore', 'ignore'] })
+  btctl.on('exit', () => { btctl = null })
+  btctl.stdin.on('error', () => {})
+  // NoInputNoOutput => "just works" pairing (no PIN) for phones
+  try { btctl.stdin.write('power on\nagent NoInputNoOutput\ndefault-agent\n') } catch (e) {}
+}
+function btWrite(cmds) { btEnsureAgent(); try { btctl.stdin.write(cmds + '\n') } catch (e) {} }
+function btInfo(mac) { try { return execSync(`bluetoothctl info ${mac} 2>/dev/null`, { encoding: 'utf8' }) } catch (e) { return '' } }
+function btScan() {
+  try {
+    const out = execSync('bluetoothctl devices Paired 2>/dev/null', { encoding: 'utf8' })
+    const devs = out.split('\n').filter((l) => l.startsWith('Device ')).map((l) => {
+      const mac = l.split(' ')[1]
+      return { mac, name: l.slice(8 + mac.length).trim() || mac }
+    })
+    let connected = null
+    for (const d of devs) {
+      const info = btInfo(d.mac)
+      d.connected = /Connected: yes/.test(info)
+      if (d.connected) { connected = { name: d.name, mac: d.mac }; btWrite(`trust ${d.mac}`) }
+    }
+    state.bluetooth.available = true
+    state.bluetooth.devices = devs
+    state.bluetooth.connected = connected
+  } catch (e) { state.bluetooth.available = true }
+}
+setInterval(() => { if (state.source === 'Bluetooth' || state.bluetooth.pairing) btScan() }, 4000)
+
 const clampFm = (f) => { f = Math.round(f * 10) / 10; if (f > 107.9) return 87.5; if (f < 87.5) return 107.9; return f }
 
 const actions = {
@@ -229,6 +261,15 @@ const actions = {
     if (b.ppm !== undefined) s.ppm = Math.round(Number(b.ppm))
     if (state.power) scheduleStart()
   },
+  btPair: () => {
+    btWrite('discoverable on\npairable on')
+    state.bluetooth.pairing = true
+    clearTimeout(btPairTimer)
+    btPairTimer = setTimeout(() => { btWrite('discoverable off'); state.bluetooth.pairing = false }, 120000)
+    btScan()
+  },
+  btConnect: (b) => { if (b.mac) { btWrite(`connect ${b.mac}`); setTimeout(btScan, 2500) } },
+  btDisconnect: () => { if (state.bluetooth.connected) { btWrite(`disconnect ${state.bluetooth.connected.mac}`); setTimeout(btScan, 1500) } },
 }
 
 // ---- HTTP + SSE ----

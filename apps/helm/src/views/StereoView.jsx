@@ -91,7 +91,7 @@ function Visualizer({ big }) {
   }
 
   return (
-    <Box ref={wrapRef} onClick={cycle} sx={{ position: 'relative', width: '100%', height: big ? 170 : 44, cursor: 'pointer' }}>
+    <Box ref={wrapRef} onClick={cycle} sx={{ position: 'relative', width: '100%', height: big ? 118 : 44, cursor: 'pointer' }}>
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
       {big && (
         <Typography sx={{ position: 'absolute', top: 4, right: 10, fontSize: '0.8rem',
@@ -250,8 +250,8 @@ export default function StereoView({ big = false }) {
         <NavCard onClick={() => c.seek(1)} big><FastForwardIcon sx={{ fontSize: big ? 44 : 22 }} /></NavCard>
       </Stack>
       {/* RDS station info decoded over the air — station name (1 line) + full message (wraps) */}
-      <Box sx={{ textAlign: 'center', minHeight: big ? 128 : 30, mt: big ? 1 : 0.25,
-        display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: big ? 0.75 : 0.25 }}>
+      <Box sx={{ textAlign: 'center', minHeight: big ? 74 : 30, mt: big ? 0.5 : 0.25,
+        display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: big ? 0.5 : 0.25 }}>
         {s.nowPlaying?.title ? (
           <Typography noWrap sx={{ fontWeight: 800, color: '#fff', lineHeight: 1.05, fontSize: big ? '3.2rem' : '1.3rem' }}>
             {s.nowPlaying.title}
@@ -403,19 +403,19 @@ export default function StereoView({ big = false }) {
   }
 
   return (
-    <Box sx={{ height: '100%', overflow: 'auto', p: 3 }}>
-      <Stack spacing={2.5} sx={{ maxWidth: '100%', mx: 'auto', height: '100%' }}>
+    <Box sx={{ height: '100%', overflow: 'hidden', p: 2.5 }}>
+      <Stack spacing={2} sx={{ maxWidth: '100%', height: '100%' }}>
         {header}
-        <Box sx={{ flex: 1, display: 'grid', gridTemplateColumns: '1.3fr 1fr 132px', gap: 3, minHeight: 0 }}>
-          <Paper sx={{ p: 3, opacity: off ? 0.5 : 1, pointerEvents: off ? 'none' : 'auto', transition: '0.2s',
-            display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 3 }}>
+        <Box sx={{ flex: 1, display: 'grid', gridTemplateColumns: '1.3fr 1fr 128px', gap: 2, minHeight: 0 }}>
+          <Paper sx={{ p: 2.5, minHeight: 0, overflow: 'hidden', opacity: off ? 0.5 : 1, pointerEvents: off ? 'none' : 'auto', transition: '0.2s',
+            display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 2 }}>
             {sourceToggle}{leftMain}<Visualizer big />
           </Paper>
-          <Paper sx={{ p: 3, opacity: off ? 0.5 : 1, pointerEvents: off ? 'none' : 'auto', transition: '0.2s',
-            display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <Paper sx={{ p: 2.5, minHeight: 0, opacity: off ? 0.5 : 1, pointerEvents: off ? 'none' : 'auto', transition: '0.2s',
+            display: 'flex', flexDirection: 'column' }}>
             <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>{middlePanel}</Box>
           </Paper>
-          <Paper sx={{ p: 2, opacity: off ? 0.5 : 1, pointerEvents: off ? 'none' : 'auto', transition: '0.2s',
+          <Paper sx={{ p: 1.5, minHeight: 0, opacity: off ? 0.5 : 1, pointerEvents: off ? 'none' : 'auto', transition: '0.2s',
             display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
             {volumeVertical}
           </Paper>
