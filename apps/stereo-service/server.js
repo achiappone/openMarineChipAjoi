@@ -47,6 +47,26 @@ const state = {
 state.fm.presets = loadPresets()
 let spectrum = new Array(NBANDS).fill(0)
 
+// Persist the stereo state so a service restart/deploy resumes instead of resetting
+// (power, source, volume, station, tuner settings survive).
+const STATE_FILE = `${__dirname}/state.json`
+let saveTimer = null
+function saveState() {
+  clearTimeout(saveTimer)
+  saveTimer = setTimeout(() => {
+    try { fs.writeFileSync(STATE_FILE, JSON.stringify({ power: state.power, source: state.source, volume: state.volume, muted: state.muted, freq: state.fm.freq, settings: state.settings })) } catch (e) {}
+  }, 500)
+}
+try {
+  const p = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
+  if (p.source) state.source = p.source
+  if (p.volume != null) state.volume = p.volume
+  state.muted = !!p.muted
+  if (p.freq) state.fm.freq = p.freq
+  if (p.settings) Object.assign(state.settings, p.settings)
+  state.power = !!p.power
+} catch (e) {}
+
 // ---- audio spectrum (FFT of the demodulated audio we play) ----
 function fft(re, im) {
   const n = re.length
@@ -338,7 +358,13 @@ const clampFm = (f) => { f = Math.round(f * 10) / 10; if (f > 107.9) return 87.5
 
 const actions = {
   power: (b) => { state.power = !!b.on; state.power ? scheduleStart() : stopRadio() },
-  source: (b) => { if (b.source) state.source = b.source; scheduleStart() },
+  source: (b) => {
+    const prev = state.source
+    if (b.source) state.source = b.source
+    // Leaving Bluetooth -> pause the phone so it doesn't keep streaming into the aux.
+    if (prev === 'Bluetooth' && state.source !== 'Bluetooth' && state.bluetooth.track && state.bluetooth.track.status === 'playing') btPlayerCmd('Pause')
+    scheduleStart()
+  },
   tune: (b) => { state.fm.freq = clampFm(Number(b.freq)); if (state.power) scheduleStart() },
   seek: (b) => { state.fm.freq = clampFm(state.fm.freq + (b.dir > 0 ? 0.2 : -0.2)); if (state.power) scheduleStart() },
   preset: (b) => { const p = state.fm.presets[b.i]; if (p != null) { state.fm.freq = p; if (state.power) scheduleStart() } },
@@ -405,6 +431,7 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       let b = {}; try { b = body ? JSON.parse(body) : {} } catch (e) {}
       try { actions[name](b) } catch (e) {}
+      saveState()
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(state))
     })
     return
@@ -420,6 +447,8 @@ setInterval(() => {
 }, 60)
 
 killPipeline()
+// Resume persisted state so a deploy/restart doesn't turn the stereo off.
+setTimeout(() => { applyVolume(); if (state.power && state.source === 'FM') scheduleStart() }, 800)
 server.listen(PORT, () => console.log('stereo-service listening on', PORT))
 process.on('SIGTERM', () => { stopRadio(); process.exit(0) })
 process.on('SIGINT', () => { stopRadio(); process.exit(0) })

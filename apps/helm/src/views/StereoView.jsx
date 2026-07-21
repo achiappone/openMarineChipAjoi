@@ -13,6 +13,7 @@ import VolumeOffIcon from '@mui/icons-material/VolumeOff'
 import FastRewindIcon from '@mui/icons-material/FastRewind'
 import FastForwardIcon from '@mui/icons-material/FastForward'
 import BookmarkAddIcon from '@mui/icons-material/BookmarkAdd'
+import SaveIcon from '@mui/icons-material/Save'
 import SettingsIcon from '@mui/icons-material/Settings'
 import ArrowBackIcon from '@mui/icons-material/ArrowBack'
 import AddIcon from '@mui/icons-material/Add'
@@ -125,11 +126,11 @@ function PresetCard({ freq, active, onSelect, onDelete, big }) {
         border: '2px solid', borderColor: active ? 'primary.main' : 'rgba(255,255,255,0.20)',
         bgcolor: active ? 'primary.main' : 'transparent', color: active ? '#001322' : 'text.primary',
         borderRadius: 2, cursor: 'pointer', userSelect: 'none', textAlign: 'center', transition: '0.15s',
-        px: big ? 3 : 1.25, py: big ? 1.75 : 0.6, minWidth: big ? 150 : 66,
+        px: big ? 3.5 : 1.25, py: big ? 2.5 : 0.6, minWidth: big ? 185 : 66,
         '&:hover': { borderColor: 'primary.main' },
       }}>
-      <Typography sx={{ fontWeight: 800, lineHeight: 1, fontSize: big ? '2rem' : '0.95rem' }}>{freq.toFixed(1)}</Typography>
-      {big && <Typography sx={{ fontSize: '0.72rem', opacity: 0.65, mt: 0.3 }}>FM</Typography>}
+      <Typography sx={{ fontWeight: 800, lineHeight: 1, fontSize: big ? '2.5rem' : '0.95rem' }}>{freq.toFixed(1)}</Typography>
+      {big && <Typography sx={{ fontSize: '0.8rem', opacity: 0.65, mt: 0.4 }}>FM</Typography>}
     </Paper>
   )
 }
@@ -296,8 +297,10 @@ export default function StereoView({ big = false }) {
     <Box>
       <Stack direction="row" alignItems="center" sx={{ mb: 1.5 }}>
         <Typography sx={{ flex: 1, fontWeight: 700, opacity: 0.85, fontSize: big ? '1.2rem' : '0.9rem' }}>Presets</Typography>
-        <Button size={big ? 'large' : 'small'} startIcon={<BookmarkAddIcon />} variant="outlined"
-          onClick={() => c.savePreset(s.fm.freq)}>Save {s.fm.freq.toFixed(1)}</Button>
+        <IconButton onClick={() => c.savePreset(s.fm.freq)} title={`Save ${s.fm.freq.toFixed(1)}`}
+          sx={{ border: '2px solid', borderColor: 'primary.main', borderRadius: 2, color: 'primary.main', p: big ? 1.25 : 0.5 }}>
+          <SaveIcon sx={{ fontSize: big ? 32 : 22 }} />
+        </IconButton>
       </Stack>
       <Stack direction="row" spacing={big ? 1.5 : 0.75} justifyContent={big ? 'flex-start' : 'center'} flexWrap="wrap" useFlexGap>
         {s.fm.presets.map((p, i) => (
