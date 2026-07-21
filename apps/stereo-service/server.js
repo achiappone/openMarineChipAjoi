@@ -227,7 +227,15 @@ function btScan() {
     for (const d of devs) {
       const info = btInfo(d.mac)
       d.connected = /Connected: yes/.test(info)
-      if (d.connected) { connected = { name: d.name, mac: d.mac }; btWrite(`trust ${d.mac}`) }
+      if (d.connected) {
+        connected = { name: d.name, mac: d.mac }
+        btWrite(`trust ${d.mac}`)
+        try {
+          const bp = '/org/bluez/hci0/dev_' + d.mac.replace(/:/g, '_')
+          const bm = /y\s+(\d+)/.exec(execSync(`busctl --system get-property org.bluez ${bp} org.bluez.Battery1 Percentage 2>/dev/null`, { encoding: 'utf8' }))
+          if (bm) connected.battery = Number(bm[1])
+        } catch (e) {}
+      }
     }
     state.bluetooth.available = true
     state.bluetooth.devices = devs
@@ -276,16 +284,25 @@ function btTrack() {
   try {
     const out = execSync(`busctl --system get-property org.bluez ${btPlayerPath} org.bluez.MediaPlayer1 Track 2>/dev/null`, { encoding: 'utf8' })
     const title = btField(out, 'Title'), artist = btField(out, 'Artist'), album = btField(out, 'Album')
-    let status = ''
+    const durM = /"Duration" u (\d+)/.exec(out); const duration = durM ? Number(durM[1]) : 0
+    let status = '', position = 0
     try { status = execSync(`busctl --system get-property org.bluez ${btPlayerPath} org.bluez.MediaPlayer1 Status 2>/dev/null`, { encoding: 'utf8' }).replace(/.*"(.*)".*/, '$1').trim() } catch (e) {}
+    try { const pm = /u\s+(\d+)/.exec(execSync(`busctl --system get-property org.bluez ${btPlayerPath} org.bluez.MediaPlayer1 Position 2>/dev/null`, { encoding: 'utf8' })); position = pm ? Number(pm[1]) : 0 } catch (e) {}
     if (title || artist) {
       const key = `${artist}|${title}`.toLowerCase()
       if (!(key in artCache)) fetchArt(artist, title)
-      state.bluetooth.track = { title, artist, album, status, artUrl: artCache[key] || null }
+      state.bluetooth.track = { title, artist, album, status, artUrl: artCache[key] || null, duration, position }
     } else state.bluetooth.track = null
   } catch (e) { btPlayerPath = ''; state.bluetooth.track = null }
 }
-setInterval(() => { if (state.source === 'Bluetooth' || state.bluetooth.pairing) { btScan(); btTrack() } }, 3000)
+setInterval(() => { if (state.source === 'Bluetooth' || state.bluetooth.pairing) { btScan(); btTrack() } }, 1500)
+
+// AVRCP transport control (Play/Pause/Next/Previous) via BlueZ system D-Bus.
+function btPlayerCmd(method) {
+  if (!btPlayerPath) return
+  try { execSync(`busctl --system call org.bluez ${btPlayerPath} org.bluez.MediaPlayer1 ${method} 2>/dev/null`, { stdio: 'ignore' }) } catch (e) {}
+  setTimeout(btTrack, 500)
+}
 
 const clampFm = (f) => { f = Math.round(f * 10) / 10; if (f > 107.9) return 87.5; if (f < 87.5) return 107.9; return f }
 
@@ -323,6 +340,9 @@ const actions = {
   btConnect: (b) => { if (b.mac) { btWrite(`connect ${b.mac}`); setTimeout(btScan, 2500) } },
   btDisconnect: () => { if (state.bluetooth.connected) { btWrite(`disconnect ${state.bluetooth.connected.mac}`); setTimeout(btScan, 1500) } },
   btCancelPair: () => { btWrite('discoverable off'); state.bluetooth.pairing = false; clearTimeout(btPairTimer) },
+  btPlayPause: () => btPlayerCmd(state.bluetooth.track && state.bluetooth.track.status === 'playing' ? 'Pause' : 'Play'),
+  btNext: () => btPlayerCmd('Next'),
+  btPrev: () => btPlayerCmd('Previous'),
 }
 
 // ---- HTTP + SSE ----

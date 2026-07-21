@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Box, Stack, Typography, ToggleButton, ToggleButtonGroup, Slider, IconButton,
-  Button, Chip, Paper, Dialog, AppBar, Toolbar, Switch, FormControlLabel, Divider,
+  Button, Chip, Paper, Dialog, AppBar, Toolbar, Switch, FormControlLabel, Divider, LinearProgress,
 } from '@mui/material'
+import PlayArrowIcon from '@mui/icons-material/PlayArrow'
+import PauseIcon from '@mui/icons-material/Pause'
+import SkipNextIcon from '@mui/icons-material/SkipNext'
+import SkipPreviousIcon from '@mui/icons-material/SkipPrevious'
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew'
 import VolumeUpIcon from '@mui/icons-material/VolumeUp'
 import VolumeOffIcon from '@mui/icons-material/VolumeOff'
@@ -206,10 +210,14 @@ function SettingsDialog({ open, onClose, settings, onChange }) {
 export default function StereoView({ big = false }) {
   const [s, setS] = useState(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [btDevOpen, setBtDevOpen] = useState(false)
   const ctl = useRef(null)
+  const posRef = useRef({ pos: 0, at: 0, key: '' })
+  const [, setTick] = useState(0)
   useEffect(() => {
     ctl.current = createRadioClient(setS)
-    return () => ctl.current && ctl.current.stop && ctl.current.stop()
+    const t = setInterval(() => setTick((x) => x + 1), 1000) // ticks the progress bar between polls
+    return () => { ctl.current && ctl.current.stop && ctl.current.stop(); clearInterval(t) }
   }, [])
   if (!s) return null
 
@@ -348,6 +356,17 @@ export default function StereoView({ big = false }) {
   // ---- source-aware content (FM tuner+presets, Bluetooth device mgmt, Aux) ----
   const isFM = s.source === 'FM'
   const bt = s.bluetooth || {}
+  // BT track progress, interpolated locally between polls
+  const fmtTime = (ms) => { const sec = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}` }
+  const tr = bt.track
+  let curPos = 0, dur = 0
+  if (tr) {
+    dur = tr.duration || 0
+    const key = `${tr.title}|${tr.position}`
+    if (posRef.current.key !== key) posRef.current = { pos: tr.position || 0, at: performance.now(), key }
+    curPos = posRef.current.pos + (tr.status === 'playing' ? performance.now() - posRef.current.at : 0)
+    if (dur) curPos = Math.min(curPos, dur)
+  }
   const btNowPlaying = (
     <Box sx={{ textAlign: 'center' }}>
       <Stack direction="row" alignItems="center" justifyContent="center" spacing={1} sx={{ mb: 1.5 }}>
@@ -390,31 +409,77 @@ export default function StereoView({ big = false }) {
       <Typography sx={{ opacity: 0.7 }}>Line in via the 3.5mm jack</Typography>
     </Box>
   )
-  const bluetoothPanel = (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <Typography variant={big ? 'h5' : 'h6'} sx={{ fontWeight: 800 }}>Devices</Typography>
-      {bt.connected ? (
-        <Paper variant="outlined" sx={{ p: 2 }}>
-          <Typography sx={{ fontWeight: 700, fontSize: big ? '1.5rem' : '1.05rem' }}>{bt.connected.name || 'Phone'}</Typography>
-          <Typography sx={{ color: 'success.main' }}>Connected</Typography>
-          <Button sx={{ mt: 1 }} onClick={() => c.btDisconnect && c.btDisconnect()}>Disconnect</Button>
-        </Paper>
+  // Compact current-device + battery strip; full device list/pairing lives in a modal.
+  const btDeviceStrip = (
+    <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: big ? 2 : 1 }}>
+      <BluetoothIcon sx={{ color: bt.connected ? 'primary.light' : 'text.disabled' }} />
+      <Box sx={{ flex: 1, minWidth: 0 }}>
+        <Typography noWrap sx={{ fontWeight: 700, fontSize: big ? '1.3rem' : '1rem' }}>
+          {bt.connected ? bt.connected.name : ((bt.devices || [])[0]?.name || 'No device')}
+        </Typography>
+        <Typography sx={{ fontSize: big ? '1rem' : '0.8rem', opacity: 0.7 }}>
+          {bt.connected ? (bt.connected.battery != null ? `Connected · Battery ${bt.connected.battery}%` : 'Connected') : 'Not connected'}
+        </Typography>
+      </Box>
+      <Button variant="outlined" size={big ? 'medium' : 'small'} startIcon={<BluetoothSearchingIcon />} onClick={() => setBtDevOpen(true)}>Devices</Button>
+    </Stack>
+  )
+  const btControlsPanel = (
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {btDeviceStrip}
+      {tr ? (
+        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: big ? 3 : 1.5 }}>
+          {dur > 0 && (
+            <Box>
+              <LinearProgress variant="determinate" value={Math.min(100, (curPos / dur) * 100)} sx={{ height: big ? 8 : 5, borderRadius: 4 }} />
+              <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.5 }}>
+                <Typography sx={{ fontSize: big ? '1.1rem' : '0.8rem', opacity: 0.75, fontVariantNumeric: 'tabular-nums' }}>{fmtTime(curPos)}</Typography>
+                <Typography sx={{ fontSize: big ? '1.1rem' : '0.8rem', opacity: 0.75, fontVariantNumeric: 'tabular-nums' }}>{fmtTime(dur)}</Typography>
+              </Stack>
+            </Box>
+          )}
+          <Stack direction="row" justifyContent="center" alignItems="center" spacing={big ? 4 : 2}>
+            <IconButton onClick={() => c.btPrev()} sx={{ border: '2px solid rgba(255,255,255,0.2)' }}><SkipPreviousIcon sx={{ fontSize: big ? 46 : 28 }} /></IconButton>
+            <IconButton onClick={() => c.btPlayPause()} sx={{ border: '2px solid', borderColor: 'primary.main', bgcolor: 'rgba(57,160,255,0.15)', p: big ? 2 : 1 }}>
+              {tr.status === 'playing' ? <PauseIcon sx={{ fontSize: big ? 60 : 34 }} /> : <PlayArrowIcon sx={{ fontSize: big ? 60 : 34 }} />}
+            </IconButton>
+            <IconButton onClick={() => c.btNext()} sx={{ border: '2px solid rgba(255,255,255,0.2)' }}><SkipNextIcon sx={{ fontSize: big ? 46 : 28 }} /></IconButton>
+          </Stack>
+        </Box>
       ) : (
-        <Typography sx={{ opacity: 0.6 }}>No phone connected</Typography>
+        <Typography sx={{ opacity: 0.6, textAlign: 'center', mt: 4, fontSize: big ? '1.3rem' : '1rem' }}>
+          {bt.connected ? 'Play something on your phone' : 'Tap Devices to connect a phone'}
+        </Typography>
       )}
-      <Button variant="contained" size="large" startIcon={<BluetoothSearchingIcon />}
-        onClick={() => c.btPair && c.btPair()} sx={{ py: 1.4, fontSize: big ? '1.15rem' : undefined }}>
-        Pair New Phone
-      </Button>
-      {(bt.devices || []).map((d) => (
-        <Button key={d.mac || d.name} variant="outlined" fullWidth sx={{ justifyContent: 'flex-start', py: 1 }}
-          onClick={() => c.btConnect && c.btConnect(d.mac)}>{d.name}</Button>
-      ))}
-      {!bt.available && <Typography sx={{ opacity: 0.4, fontSize: '0.85rem', mt: 1 }}>Bluetooth audio backend is being set up.</Typography>}
     </Box>
   )
+  const btDevicesModal = (
+    <Dialog open={btDevOpen} onClose={() => setBtDevOpen(false)} maxWidth="sm" fullWidth>
+      <Box sx={{ p: 3 }}>
+        <Typography variant="h5" sx={{ fontWeight: 800, mb: 2 }}>Bluetooth Devices</Typography>
+        {bt.connected ? (
+          <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+            <Typography sx={{ fontWeight: 700, fontSize: '1.3rem' }}>{bt.connected.name}</Typography>
+            <Typography sx={{ color: 'success.main' }}>
+              Connected{bt.connected.battery != null ? ` · Battery ${bt.connected.battery}%` : ''}
+            </Typography>
+            <Button sx={{ mt: 1 }} onClick={() => c.btDisconnect()}>Disconnect</Button>
+          </Paper>
+        ) : <Typography sx={{ opacity: 0.6, mb: 2 }}>No phone connected</Typography>}
+        <Button variant="contained" size="large" fullWidth startIcon={<BluetoothSearchingIcon />}
+          onClick={() => c.btPair()} sx={{ py: 1.5, mb: 2 }}>Pair New Phone</Button>
+        {(bt.devices || []).filter((d) => !d.connected).map((d) => (
+          <Button key={d.mac} variant="outlined" fullWidth sx={{ justifyContent: 'flex-start', mb: 1, py: 1 }}
+            onClick={() => c.btConnect(d.mac)}>{d.name}</Button>
+        ))}
+        <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+          <Button size="large" onClick={() => setBtDevOpen(false)}>Close</Button>
+        </Stack>
+      </Box>
+    </Dialog>
+  )
   const leftMain = isFM ? tuner : s.source === 'Bluetooth' ? btNowPlaying : auxMain
-  const middlePanel = isFM ? presets : s.source === 'Bluetooth' ? bluetoothPanel : (
+  const middlePanel = isFM ? presets : s.source === 'Bluetooth' ? btControlsPanel : (
     <Box sx={{ opacity: 0.5, p: 2 }}>No presets for {s.source}.</Box>
   )
 
@@ -428,6 +493,7 @@ export default function StereoView({ big = false }) {
           </Paper>
         </Stack>
         {dialog}
+        {btDevicesModal}
       </Box>
     )
   }
@@ -452,6 +518,7 @@ export default function StereoView({ big = false }) {
         </Box>
       </Stack>
       {dialog}
+      {btDevicesModal}
     </Box>
   )
 }

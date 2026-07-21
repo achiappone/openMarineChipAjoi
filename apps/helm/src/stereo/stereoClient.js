@@ -24,7 +24,7 @@ export function createRadioClient(onChange) {
     }).then((r) => r.json()).then(apply).catch(() => apply(OFFLINE))
 
   refresh()
-  const poll = setInterval(refresh, 5000)
+  const poll = setInterval(refresh, 2000)
 
   // Optimistic frequency update so the display/slider move instantly on tap,
   // instead of waiting for the POST round-trip.
@@ -61,6 +61,10 @@ export function createRadioClient(onChange) {
     btPair: () => post('btPair', {}),
     btConnect: (mac) => post('btConnect', { mac }),
     btDisconnect: () => post('btDisconnect', {}),
+    btCancelPair: () => post('btCancelPair', {}),
+    btPlayPause: () => post('btPlayPause', {}),
+    btNext: () => post('btNext', {}),
+    btPrev: () => post('btPrev', {}),
     stop: () => clearInterval(poll),
   }
 }
