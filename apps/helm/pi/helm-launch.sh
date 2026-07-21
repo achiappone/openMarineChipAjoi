@@ -6,11 +6,12 @@ export DISPLAY=:0
 export XAUTHORITY=/home/pi/.Xauthority
 URL="http://localhost:3000/openmarine-helm/"
 [ -n "$1" ] && URL="${URL}#$1"
-# Kill only a prior kiosk chromium. Pattern is specific ('chromium-browser.*helm-kiosk')
-# so it never matches the launching shell (a bare 'helm-kiosk' pattern self-matches
-# any command line that mentions the profile dir or logfile, killing itself).
+# Kill only a prior kiosk chromium (specific pattern so it never self-matches a shell).
 pkill -f "chromium-browser.*helm-kiosk" 2>/dev/null
 sleep 1
+# Clear stale single-instance locks: a crashed chromium leaves these behind and
+# the next launch then opens a blank window or none at all.
+rm -f /home/pi/.config/helm-kiosk/Singleton* 2>/dev/null
 exec chromium-browser --kiosk "$URL" \
   --user-data-dir=/home/pi/.config/helm-kiosk \
   --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble
