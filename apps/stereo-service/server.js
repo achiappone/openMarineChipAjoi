@@ -8,6 +8,9 @@ const PORT = 8082
 const AUDIO_DEV = process.env.AUDIO_DEV || 'plughw:CARD=Headphones' // 3.5mm aux
 const MIXER_CARD = process.env.MIXER_CARD || 'Headphones'
 const MIXER_CTL = process.env.MIXER_CTL || 'PCM'
+// Fixed tuner gain (dB). Higher pulls a marginal antenna signal above the noise;
+// too high can overload a strong clean signal. 40 suits the stock whip; tune via env.
+const RTL_GAIN = process.env.RTL_GAIN || '40'
 
 const state = {
   connected: true,
@@ -47,7 +50,7 @@ function scheduleStart() {
     if (!state.power || state.source !== 'FM') return
     const f = state.fm.freq.toFixed(1)
     const cmd =
-      `rtl_fm -f ${f}M -M wbfm -s 200000 -r 48000 -l 0 -E deemp - 2>/dev/null | ` +
+      `rtl_fm -f ${f}M -M wbfm -s 200000 -r 48000 -F 9 -E deemp -l 0 -g ${RTL_GAIN} - 2>/dev/null | ` +
       `aplay -q -r 48000 -f S16_LE -t raw -c 1 -D ${AUDIO_DEV}`
     radio = spawn('bash', ['-c', cmd], { detached: true, stdio: 'ignore' })
     radio.unref()
