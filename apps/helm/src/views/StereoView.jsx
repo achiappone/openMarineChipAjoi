@@ -139,6 +139,13 @@ function NavCard({ onClick, big, children }) {
 function SettingsDialog({ open, onClose, settings, onChange }) {
   const st = settings || {}
   const auto = st.gain < 0
+  // Local slider state so dragging stays smooth; only commit (which restarts the
+  // tuner) when the finger lifts, via onChangeCommitted.
+  const [gain, setGain] = useState(st.gain)
+  const [squelch, setSquelch] = useState(st.squelch || 0)
+  useEffect(() => { setGain(st.gain) }, [st.gain])
+  useEffect(() => { setSquelch(st.squelch || 0) }, [st.squelch])
+  const faderSx = { py: 2, '& .MuiSlider-thumb': { width: 34, height: 34 }, '& .MuiSlider-rail, & .MuiSlider-track': { height: 12, borderRadius: 8 } }
   return (
     <Dialog fullScreen open={open} onClose={onClose}>
       <AppBar sx={{ position: 'relative', bgcolor: 'background.paper' }} elevation={0}>
@@ -156,8 +163,9 @@ function SettingsDialog({ open, onClose, settings, onChange }) {
                 control={<Switch checked={auto} onChange={(e) => onChange({ gain: e.target.checked ? -1 : 30 })} />}
                 label="Auto" />
             </Stack>
-            <Slider disabled={auto} value={auto ? 49.6 : st.gain} min={0} max={49.6} step={0.1}
-              onChange={(_, v) => onChange({ gain: v })} valueLabelDisplay="auto" />
+            <Slider disabled={auto} value={auto ? 49.6 : gain} min={0} max={49.6} step={0.1}
+              onChange={(_, v) => setGain(v)} onChangeCommitted={(_, v) => onChange({ gain: v })}
+              valueLabelDisplay="auto" sx={faderSx} />
             <Typography sx={{ opacity: 0.55, fontSize: '0.85rem' }}>
               Higher pulls weak signals up; too high overloads a strong station into hiss.
             </Typography>
@@ -172,8 +180,9 @@ function SettingsDialog({ open, onClose, settings, onChange }) {
           <Divider />
           <Box>
             <Typography sx={{ fontWeight: 700, mb: 1 }}>Squelch</Typography>
-            <Slider value={st.squelch || 0} min={0} max={80} step={1}
-              onChange={(_, v) => onChange({ squelch: v })} valueLabelDisplay="auto" />
+            <Slider value={squelch} min={0} max={80} step={1}
+              onChange={(_, v) => setSquelch(v)} onChangeCommitted={(_, v) => onChange({ squelch: v })}
+              valueLabelDisplay="auto" sx={faderSx} />
             <Typography sx={{ opacity: 0.55, fontSize: '0.85rem' }}>Mutes weak/noisy signals below the threshold (0 = off).</Typography>
           </Box>
           <Box>

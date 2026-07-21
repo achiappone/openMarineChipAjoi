@@ -10,6 +10,9 @@ const AUDIO_DEV = process.env.AUDIO_DEV || 'plughw:CARD=Headphones' // 3.5mm aux
 const MIXER_CARD = process.env.MIXER_CARD || 'Headphones'
 const MIXER_CTL = process.env.MIXER_CTL || 'PCM'
 const RTL_GAIN = process.env.RTL_GAIN || '40'
+// The bcm2835 analog out is logarithmic; below ~this % it's inaudible (and the BT
+// transmitter has its own floor). Map the whole 1..30 slider into the usable band.
+const VOL_FLOOR_PCT = Number(process.env.VOL_FLOOR_PCT || 70)
 const PRESETS_FILE = `${__dirname}/presets.json`
 const RATE = 48000
 const FFT_SIZE = 1024
@@ -104,7 +107,10 @@ function clearSpectrum() { spectrum = new Array(NBANDS).fill(0); samples = [] }
 let rtlProc = null, aplayProc = null, soxProc = null, redseaProc = null, restartTimer = null, rdsBuf = ''
 
 function applyVolume() {
-  const pct = state.muted ? 0 : Math.round((state.volume / 30) * 90)
+  let pct = 0
+  if (!state.muted && state.volume > 0) {
+    pct = Math.round(VOL_FLOOR_PCT + ((state.volume - 1) / (30 - 1)) * (100 - VOL_FLOOR_PCT))
+  }
   spawn('amixer', ['-c', MIXER_CARD, 'sset', MIXER_CTL, `${pct}%`], { stdio: 'ignore' })
 }
 
