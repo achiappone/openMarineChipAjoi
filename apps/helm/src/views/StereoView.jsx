@@ -224,6 +224,7 @@ export default function StereoView({ big = false }) {
   const ctl = useRef(null)
   const posRef = useRef({ pos: 0, at: 0, key: '' })
   const renameRef = useRef(null)
+  const swipeX = useRef(0)
   const [, setTick] = useState(0)
   useEffect(() => {
     ctl.current = createRadioClient(setS)
@@ -391,7 +392,9 @@ export default function StereoView({ big = false }) {
     <Box sx={{ textAlign: 'center' }}>
       {bt.track ? (
         <Stack direction="row" spacing={big ? 3 : 1.5} alignItems="center"
-          sx={{ bgcolor: 'rgba(57,160,255,0.12)', border: '1px solid rgba(57,160,255,0.4)', borderRadius: 2, p: big ? 2.5 : 1.5 }}>
+          onTouchStart={(e) => { swipeX.current = e.touches[0].clientX }}
+          onTouchEnd={(e) => { const dx = e.changedTouches[0].clientX - swipeX.current; if (dx < -50) c.btNext(); else if (dx > 50) c.btPrev() }}
+          sx={{ bgcolor: 'rgba(57,160,255,0.12)', border: '1px solid rgba(57,160,255,0.4)', borderRadius: 2, p: big ? 2.5 : 1.5, touchAction: 'pan-y', userSelect: 'none' }}>
           {bt.track.artKey && (
             <Box component="img" src={`${SVC}/api/art?k=${encodeURIComponent(bt.track.artKey)}`} alt=""
               sx={{ width: big ? 150 : 60, height: big ? 150 : 60, borderRadius: 1.5, flexShrink: 0, objectFit: 'cover' }} />
