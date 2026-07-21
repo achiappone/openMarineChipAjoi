@@ -380,6 +380,7 @@ const actions = {
   source: (b) => {
     const prev = state.source
     if (b.source) state.source = b.source
+    state.power = true // no power button anymore: picking a source powers on
     // Leaving Bluetooth -> pause the phone so it doesn't keep streaming into the aux.
     if (prev === 'Bluetooth' && state.source !== 'Bluetooth' && state.bluetooth.track && state.bluetooth.track.status === 'playing') btPlayerCmd('Pause')
     scheduleStart()
@@ -471,7 +472,7 @@ setInterval(() => {
 
 killPipeline()
 // Resume persisted state so a deploy/restart doesn't turn the stereo off.
-setTimeout(() => { applyVolume(); if (state.power && state.source === 'FM') scheduleStart() }, 800)
+setTimeout(() => { state.power = true; applyVolume(); if (state.source === 'FM') scheduleStart() }, 800)
 server.listen(PORT, () => console.log('stereo-service listening on', PORT))
 process.on('SIGTERM', () => { stopRadio(); process.exit(0) })
 process.on('SIGINT', () => { stopRadio(); process.exit(0) })

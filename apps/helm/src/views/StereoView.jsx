@@ -253,10 +253,6 @@ export default function StereoView({ big = false }) {
       <IconButton size={big ? 'large' : 'small'} onClick={() => setSettingsOpen(true)} title="FM tuner settings">
         <SettingsIcon fontSize={big ? 'medium' : 'small'} />
       </IconButton>
-      <ToggleButton value="power" selected={s.power} onChange={() => c.setPower(!s.power)}
-        color="success" size={big ? 'large' : 'small'} sx={{ px: big ? 2.5 : 1.5 }}>
-        <PowerSettingsNewIcon fontSize={big ? 'medium' : 'small'} sx={{ mr: 0.75 }} /> {s.power ? 'On' : 'Off'}
-      </ToggleButton>
     </Stack>
   )
 
