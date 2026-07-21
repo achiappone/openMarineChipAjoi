@@ -242,33 +242,62 @@ function btScan() {
     state.bluetooth.connected = connected
   } catch (e) { state.bluetooth.available = true }
 }
-// Album art: BlueZ doesn't expose AVRCP cover art, so look it up online from the
-// artist+title via the free iTunes Search API (Pi has internet). Cached per track.
-const artCache = {}
+// Album art: BlueZ can't deliver AVRCP cover art, so look it up from the artist+title
+// via the iTunes Search API. Force IPv4 (the Pi's IPv6 stalls), DOWNLOAD the image
+// here, and serve it from localhost so the Pi's browser never hits the slow CDN.
+const artCache = {} // key -> art key string (ready) | false (none) | null (pending)
+let currentArt = { key: '', buf: null, type: 'image/jpeg' }
+function getBuf(url, cb) {
+  const req = https.get(url, { family: 4, timeout: 9000 }, (res) => {
+    const chunks = []
+    res.on('data', (c) => chunks.push(c))
+    res.on('end', () => cb(null, Buffer.concat(chunks), res.headers['content-type']))
+  })
+  req.on('error', () => cb(new Error('err')))
+  req.on('timeout', () => { req.destroy(); cb(new Error('timeout')) })
+}
 function fetchArt(artist, title) {
   const key = `${artist}|${title}`.toLowerCase()
   if (key in artCache) return
   artCache[key] = null // pending
-  const url = `https://itunes.apple.com/search?term=${encodeURIComponent(`${artist} ${title}`)}&media=music&entity=song&limit=1`
-  https.get(url, (res) => {
+  const api = `https://itunes.apple.com/search?term=${encodeURIComponent(`${artist} ${title}`)}&media=music&entity=song&limit=1`
+  const req = https.get(api, { family: 4, timeout: 9000 }, (res) => {
     let d = ''
     res.on('data', (c) => (d += c))
     res.on('end', () => {
       try {
         const r = JSON.parse(d).results
         let art = r && r[0] && r[0].artworkUrl100
-        if (art) art = art.replace('100x100bb', '600x600bb')
-        artCache[key] = art || null
-      } catch (e) { artCache[key] = null }
+        if (!art) { artCache[key] = false; return }
+        art = art.replace('100x100bb', '300x300bb') // smaller = faster
+        getBuf(art, (err, buf, type) => {
+          if (err || !buf || !buf.length) { artCache[key] = false; return }
+          currentArt = { key, buf, type: type || 'image/jpeg' }
+          artCache[key] = key
+        })
+      } catch (e) { artCache[key] = false }
     })
-  }).on('error', () => { artCache[key] = null })
+  })
+  req.on('error', () => { artCache[key] = false })
+  req.on('timeout', () => { req.destroy(); artCache[key] = false })
 }
 
 // AVRCP track metadata from BlueZ's system D-Bus (no extra deps).
 let btPlayerPath = ''
 function btField(out, key) {
   const m = new RegExp('"' + key + '" s "((?:\\\\.|[^"\\\\])*)"').exec(out)
-  return m ? m[1].replace(/\\(.)/g, '$1') : ''
+  if (!m) return ''
+  // busctl escapes special chars as \c and non-ASCII bytes as octal \NNN; rebuild
+  // the byte sequence then decode UTF-8 (so apostrophes/accents come out right).
+  const s = m[1], bytes = []
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '\\') {
+      const n = s[i + 1]
+      if (n >= '0' && n <= '7') { bytes.push(parseInt(s.substr(i + 1, 3), 8) & 0xff); i += 3 }
+      else { bytes.push(n.charCodeAt(0)); i += 1 }
+    } else bytes.push(s.charCodeAt(i) & 0xff)
+  }
+  return Buffer.from(bytes).toString('utf8')
 }
 function btTrack() {
   if (!state.bluetooth.connected) { state.bluetooth.track = null; btPlayerPath = ''; return }
@@ -291,7 +320,8 @@ function btTrack() {
     if (title || artist) {
       const key = `${artist}|${title}`.toLowerCase()
       if (!(key in artCache)) fetchArt(artist, title)
-      state.bluetooth.track = { title, artist, album, status, artUrl: artCache[key] || null, duration, position }
+      const artKey = typeof artCache[key] === 'string' ? artCache[key] : null
+      state.bluetooth.track = { title, artist, album, status, artKey, duration, position }
     } else state.bluetooth.track = null
   } catch (e) { btPlayerPath = ''; state.bluetooth.track = null }
 }
@@ -360,6 +390,10 @@ const server = http.createServer((req, res) => {
     sseClients.add(res)
     req.on('close', () => sseClients.delete(res))
     return
+  }
+  if (req.method === 'GET' && path === '/api/art') {
+    if (currentArt.buf) { res.writeHead(200, { 'Content-Type': currentArt.type, 'Cache-Control': 'public, max-age=86400' }); return res.end(currentArt.buf) }
+    res.writeHead(404); return res.end('no art')
   }
   if (req.method === 'GET' && path === '/api/state') {
     res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(state))

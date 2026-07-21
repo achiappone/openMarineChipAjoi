@@ -378,8 +378,8 @@ export default function StereoView({ big = false }) {
       {bt.track ? (
         <Stack direction="row" spacing={big ? 3 : 1.5} alignItems="center"
           sx={{ bgcolor: 'rgba(57,160,255,0.12)', border: '1px solid rgba(57,160,255,0.4)', borderRadius: 2, p: big ? 2.5 : 1.5 }}>
-          {bt.track.artUrl && (
-            <Box component="img" src={bt.track.artUrl} alt=""
+          {bt.track.artKey && (
+            <Box component="img" src={`${SVC}/api/art?k=${encodeURIComponent(bt.track.artKey)}`} alt=""
               sx={{ width: big ? 150 : 60, height: big ? 150 : 60, borderRadius: 1.5, flexShrink: 0, objectFit: 'cover' }} />
           )}
           <Box sx={{ minWidth: 0, flex: 1, textAlign: bt.track.artUrl ? 'left' : 'center' }}>
