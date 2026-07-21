@@ -24,14 +24,26 @@ const NBANDS = 32
 const MPX_RATE = 171000 // rtl_fm -M fm output; wide enough for the 57 kHz RDS subcarrier
 const REDSEA = process.env.REDSEA || '/home/pi/build/redsea/build/redsea'
 
-const DEFAULT_PRESETS = [88.5, 93.7, 101.5, 104.3, 107.9]
+// Presets are objects { freq, name, pty } — name = RDS station name, pty = genre.
+const DEFAULT_PRESETS = [88.5, 93.7, 101.5, 104.3, 107.9].map((f) => ({ freq: f, name: '', pty: '' }))
 function loadPresets() {
   try {
     const p = JSON.parse(fs.readFileSync(PRESETS_FILE, 'utf8'))
-    return Array.isArray(p) ? p.filter((n) => typeof n === 'number') : DEFAULT_PRESETS
+    if (!Array.isArray(p)) return DEFAULT_PRESETS
+    return p.map((x) => (typeof x === 'number' ? { freq: x, name: '', pty: '' } : { freq: Number(x.freq), name: x.name || '', pty: x.pty || '' }))
+      .filter((x) => typeof x.freq === 'number' && !isNaN(x.freq))
   } catch (e) { return DEFAULT_PRESETS }
 }
 function savePresets() { try { fs.writeFileSync(PRESETS_FILE, JSON.stringify(state.fm.presets)) } catch (e) {} }
+// Keep the preset for the current station fresh with the latest decoded RDS info.
+function updatePresetInfo() {
+  const p = state.fm.presets.find((x) => Math.abs(x.freq - state.fm.freq) < 0.05)
+  if (!p) return
+  let changed = false
+  if (state.nowPlaying.title && p.name !== state.nowPlaying.title) { p.name = state.nowPlaying.title; changed = true }
+  if (state.nowPlaying.pty && p.pty !== state.nowPlaying.pty) { p.pty = state.nowPlaying.pty; changed = true }
+  if (changed) savePresets()
+}
 
 const state = {
   connected: true,
@@ -40,7 +52,7 @@ const state = {
   volume: 12,
   muted: false,
   fm: { freq: 101.5, presets: [] },
-  nowPlaying: { title: 'FM Radio', artist: '' },
+  nowPlaying: { title: 'FM Radio', artist: '', pty: '' },
   settings: { gain: Number(RTL_GAIN) || 40, deemp: true, squelch: 0, ppm: 0, filter: true }, // gain<0 = auto
   bluetooth: { available: false, connected: null, devices: [], track: null }, // A2DP sink — backend TBD
 }
@@ -159,6 +171,7 @@ function notePs(raw) {
     else { psBuilding.push(t); if (psBuilding.length > 24) { psComplete = psBuilding.join(' '); psBuilding = [t] } }
   }
   state.nowPlaying.artist = rdsMessage()
+  updatePresetInfo()
 }
 
 // Parse redsea's JSON lines; pull the station name (ps) and radio text.
@@ -172,6 +185,7 @@ function parseRds(d) {
       const j = JSON.parse(line)
       if (j.ps) notePs(j.ps)
       if (j.radiotext && j.radiotext.trim()) { rtText = j.radiotext.trim(); state.nowPlaying.artist = rdsMessage() }
+      if (j.prog_type && j.prog_type !== 'None') { state.nowPlaying.pty = j.prog_type; updatePresetInfo() }
     } catch (e) {}
   }
 }
@@ -191,7 +205,7 @@ function scheduleStart() {
   restartTimer = setTimeout(() => {
     if (!state.power || state.source !== 'FM') return
     const st = state.settings, f = state.fm.freq.toFixed(1)
-    state.nowPlaying = { title: '', artist: '' } // clear RDS from the previous station
+    state.nowPlaying = { title: '', artist: '', pty: '' } // clear RDS from the previous station
     resetRds()
     // rtl_fm -M fm @171k = raw FM multiplex (audio 0-15k + RDS subcarrier @57k)
     const args = ['-f', `${f}M`, '-M', 'fm', '-l', String(st.squelch || 0), '-A', 'std', '-p', String(st.ppm || 0), '-s', String(MPX_RATE)]
@@ -222,7 +236,7 @@ function scheduleStart() {
     setTimeout(applyVolume, 500)
   }, RETUNE_DELAY)
 }
-function stopRadio() { clearTimeout(restartTimer); killPipeline(); state.nowPlaying = { title: 'FM Radio', artist: '' } }
+function stopRadio() { clearTimeout(restartTimer); killPipeline(); state.nowPlaying = { title: 'FM Radio', artist: '', pty: '' } }
 
 // ---- Bluetooth (A2DP sink via BlueZ; PipeWire routes the audio) ----
 let btctl = null, btPairTimer = null
@@ -367,11 +381,11 @@ const actions = {
   },
   tune: (b) => { state.fm.freq = clampFm(Number(b.freq)); if (state.power) scheduleStart() },
   seek: (b) => { state.fm.freq = clampFm(state.fm.freq + (b.dir > 0 ? 0.2 : -0.2)); if (state.power) scheduleStart() },
-  preset: (b) => { const p = state.fm.presets[b.i]; if (p != null) { state.fm.freq = p; if (state.power) scheduleStart() } },
+  preset: (b) => { const p = state.fm.presets[b.i]; if (p) { state.fm.freq = p.freq; if (state.power) scheduleStart() } },
   savePreset: (b) => {
     const f = clampFm(Number(b.freq != null ? b.freq : state.fm.freq))
-    if (!state.fm.presets.some((p) => Math.abs(p - f) < 0.05)) {
-      state.fm.presets = [...state.fm.presets, f].sort((a, b) => a - b); savePresets()
+    if (!state.fm.presets.some((p) => Math.abs(p.freq - f) < 0.05)) {
+      state.fm.presets = [...state.fm.presets, { freq: f, name: state.nowPlaying.title || '', pty: state.nowPlaying.pty || '' }].sort((a, b) => a.freq - b.freq); savePresets()
     }
   },
   removePreset: (b) => { if (b.i >= 0 && b.i < state.fm.presets.length) { state.fm.presets.splice(b.i, 1); savePresets() } },

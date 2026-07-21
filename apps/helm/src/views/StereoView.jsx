@@ -113,7 +113,7 @@ function Visualizer({ big }) {
 }
 
 // Card-style preset: tap to tune, long-press (650ms) to remove.
-function PresetCard({ freq, active, onSelect, onDelete, big }) {
+function PresetCard({ preset, active, onSelect, onDelete, big }) {
   const t = useRef(null), held = useRef(false)
   const start = () => { held.current = false; t.current = setTimeout(() => { held.current = true; onDelete() }, 650) }
   const end = () => { if (t.current) { clearTimeout(t.current); t.current = null; if (!held.current) onSelect() } }
@@ -126,11 +126,15 @@ function PresetCard({ freq, active, onSelect, onDelete, big }) {
         border: '2px solid', borderColor: active ? 'primary.main' : 'rgba(255,255,255,0.20)',
         bgcolor: active ? 'primary.main' : 'transparent', color: active ? '#001322' : 'text.primary',
         borderRadius: 2, cursor: 'pointer', userSelect: 'none', textAlign: 'center', transition: '0.15s',
-        px: big ? 3.5 : 1.25, py: big ? 2.5 : 0.6, minWidth: big ? 185 : 66,
+        px: big ? 3 : 1.25, py: big ? 2 : 0.6, minWidth: big ? 185 : 66, maxWidth: big ? 250 : 'none',
         '&:hover': { borderColor: 'primary.main' },
       }}>
-      <Typography sx={{ fontWeight: 800, lineHeight: 1, fontSize: big ? '2.5rem' : '0.95rem' }}>{freq.toFixed(1)}</Typography>
-      {big && <Typography sx={{ fontSize: '0.8rem', opacity: 0.65, mt: 0.4 }}>FM</Typography>}
+      <Typography sx={{ fontWeight: 800, lineHeight: 1, fontSize: big ? '2.4rem' : '0.95rem' }}>{preset.freq.toFixed(1)}</Typography>
+      {big && (preset.name || preset.pty) && (
+        <Typography noWrap sx={{ fontSize: '0.95rem', fontWeight: 600, opacity: active ? 0.85 : 0.7, mt: 0.5, maxWidth: 210 }}>
+          {preset.name || preset.pty}
+        </Typography>
+      )}
     </Paper>
   )
 }
@@ -216,6 +220,7 @@ export default function StereoView({ big = false }) {
   const [s, setS] = useState(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [btDevOpen, setBtDevOpen] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState(null) // { i, preset } pending removal
   const ctl = useRef(null)
   const posRef = useRef({ pos: 0, at: 0, key: '' })
   const [, setTick] = useState(0)
@@ -250,10 +255,13 @@ export default function StereoView({ big = false }) {
   )
 
   const sourceToggle = (
-    <ToggleButtonGroup exclusive fullWidth size={big ? 'large' : 'small'} value={s.source}
-      onChange={(_, v) => v && c.setSource(v)}>
-      {SOURCES.map((src) => <ToggleButton key={src} value={src} sx={{ py: big ? 1.4 : 0.75, fontSize: big ? '1.15rem' : undefined }}>{src}</ToggleButton>)}
-    </ToggleButtonGroup>
+    <Box>
+      <Typography sx={{ fontSize: big ? '0.9rem' : '0.68rem', opacity: 0.5, fontWeight: 700, letterSpacing: 1.5, mb: 0.75 }}>SOURCE</Typography>
+      <ToggleButtonGroup exclusive fullWidth size={big ? 'large' : 'small'} value={s.source}
+        onChange={(_, v) => v && c.setSource(v)}>
+        {SOURCES.map((src) => <ToggleButton key={src} value={src} sx={{ py: big ? 1.4 : 0.75, fontSize: big ? '1.15rem' : undefined }}>{src}</ToggleButton>)}
+      </ToggleButtonGroup>
+    </Box>
   )
 
   const tuner = s.source === 'FM' ? (
@@ -304,8 +312,8 @@ export default function StereoView({ big = false }) {
       </Stack>
       <Stack direction="row" spacing={big ? 1.5 : 0.75} justifyContent={big ? 'flex-start' : 'center'} flexWrap="wrap" useFlexGap>
         {s.fm.presets.map((p, i) => (
-          <PresetCard key={`${p}-${i}`} freq={p} big={big} active={Math.abs(p - s.fm.freq) < 0.05}
-            onSelect={() => c.selectPreset(i)} onDelete={() => c.removePreset(i)} />
+          <PresetCard key={`${p.freq}-${i}`} preset={p} big={big} active={Math.abs(p.freq - s.fm.freq) < 0.05}
+            onSelect={() => c.selectPreset(i)} onDelete={() => setDeleteConfirm({ i, preset: p })} />
         ))}
         {s.fm.presets.length === 0 && <Typography sx={{ opacity: 0.5 }}>No presets — tune a station and tap Save</Typography>}
       </Stack>
@@ -498,6 +506,21 @@ export default function StereoView({ big = false }) {
   const middlePanel = isFM ? presets : s.source === 'Bluetooth' ? btControlsPanel : (
     <Box sx={{ opacity: 0.5, p: 2 }}>No presets for {s.source}.</Box>
   )
+  const deleteDialog = (
+    <Dialog open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)} maxWidth="xs" fullWidth>
+      <Box sx={{ p: 3, textAlign: 'center' }}>
+        <Typography variant="h6" sx={{ fontWeight: 800, mb: 1 }}>Remove preset?</Typography>
+        <Typography sx={{ mb: 3, opacity: 0.85, fontSize: '1.3rem' }}>
+          {deleteConfirm ? `${deleteConfirm.preset.freq.toFixed(1)}${deleteConfirm.preset.name ? ' · ' + deleteConfirm.preset.name : ''}` : ''}
+        </Typography>
+        <Stack direction="row" spacing={2} justifyContent="center">
+          <Button size="large" variant="outlined" onClick={() => setDeleteConfirm(null)} sx={{ px: 4, py: 1.5 }}>Cancel</Button>
+          <Button size="large" variant="contained" color="error" sx={{ px: 4, py: 1.5 }}
+            onClick={() => { c.removePreset(deleteConfirm.i); setDeleteConfirm(null) }}>Remove</Button>
+        </Stack>
+      </Box>
+    </Dialog>
+  )
 
   if (!big) {
     return (
@@ -510,6 +533,7 @@ export default function StereoView({ big = false }) {
         </Stack>
         {dialog}
         {btDevicesModal}
+        {deleteDialog}
       </Box>
     )
   }
@@ -535,6 +559,7 @@ export default function StereoView({ big = false }) {
       </Stack>
       {dialog}
       {btDevicesModal}
+      {deleteDialog}
     </Box>
   )
 }
