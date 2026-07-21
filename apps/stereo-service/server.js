@@ -135,7 +135,7 @@ function scheduleStart() {
     aplayProc.stdin.on('error', () => {})
     rtlProc.on('error', () => {})
     setTimeout(applyVolume, 500)
-  }, 700)
+  }, 400) // short debounce: snappy retune while still coalescing rapid taps
 }
 function stopRadio() { clearTimeout(restartTimer); killPipeline() }
 

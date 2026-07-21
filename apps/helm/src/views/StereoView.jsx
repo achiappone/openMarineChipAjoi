@@ -18,26 +18,85 @@ import { createRadioClient } from '../stereo/stereoClient'
 
 const SVC = `http://${location.hostname}:8082`
 
-// Live audio-spectrum bars, fed by the service's FFT of the demodulated audio.
+// ---- Visualizations: 10 canvas modes driven by the live audio spectrum ----
+const VIS_MODES = ['Bars', 'Mirror', 'Tunnel', 'Wave', 'Radial', 'LED Blocks', 'Area', 'Dots', 'Ripple', 'Peak Bars']
+
+function mixColor(t) { // blue #1f6feb -> green #3ddc84
+  const a = [31, 111, 235], b = [61, 220, 132]
+  return `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(',')})`
+}
+
+function drawVis(mode, ctx, W, H, spec, peaks, t) {
+  const n = spec.length || 32
+  let avg = 0; for (let i = 0; i < n; i++) avg += spec[i] || 0; avg /= n || 1
+  const bw = W / n
+  switch (mode) {
+    case 0: for (let i = 0; i < n; i++) { const bh = Math.max(2, (spec[i] || 0) * H); ctx.fillStyle = mixColor(i / n); ctx.fillRect(i * bw + bw * 0.15, H - bh, bw * 0.7, bh) } break
+    case 1: for (let i = 0; i < n; i++) { const bh = Math.max(1, (spec[i] || 0) * H * 0.5); ctx.fillStyle = mixColor(i / n); ctx.fillRect(i * bw + bw * 0.15, H / 2 - bh, bw * 0.7, bh * 2) } break
+    case 2: { const cx = W / 2, cy = H / 2, mr = Math.min(W, H) / 2; ctx.lineWidth = 2; for (let i = n - 1; i >= 0; i--) { const v = spec[i] || 0; const r = (((i / n) * mr + v * mr * 0.35 + (t % 40) / 40 * (mr / n))) % mr; ctx.strokeStyle = mixColor(1 - i / n); ctx.globalAlpha = 0.25 + v * 0.75; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 6.2832); ctx.stroke() } ctx.globalAlpha = 1; break }
+    case 3: { ctx.beginPath(); for (let i = 0; i < n; i++) { const x = (i / (n - 1)) * W, y = H - (spec[i] || 0) * H; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y) } ctx.strokeStyle = mixColor(0.5); ctx.lineWidth = 3; ctx.stroke(); break }
+    case 4: { const cx = W / 2, cy = H / 2, r0 = Math.min(W, H) * 0.13, ml = Math.min(W, H) * 0.35; ctx.lineWidth = 3; for (let i = 0; i < n; i++) { const a = (i / n) * 6.2832 - 1.5708, v = spec[i] || 0; ctx.strokeStyle = mixColor(i / n); ctx.beginPath(); ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0); ctx.lineTo(cx + Math.cos(a) * (r0 + v * ml), cy + Math.sin(a) * (r0 + v * ml)); ctx.stroke() } break }
+    case 5: { const seg = 10, gap = 2, sh = (H - seg * gap) / seg; for (let i = 0; i < n; i++) { const lit = Math.round((spec[i] || 0) * seg); for (let s = 0; s < lit; s++) { ctx.fillStyle = mixColor(s / seg); ctx.fillRect(i * bw + bw * 0.15, H - (s + 1) * (sh + gap), bw * 0.7, sh) } } break }
+    case 6: { ctx.beginPath(); ctx.moveTo(0, H); for (let i = 0; i < n; i++) ctx.lineTo((i / (n - 1)) * W, H - (spec[i] || 0) * H); ctx.lineTo(W, H); ctx.closePath(); const g = ctx.createLinearGradient(0, H, 0, 0); g.addColorStop(0, 'rgba(31,111,235,0.25)'); g.addColorStop(1, 'rgba(61,220,132,0.9)'); ctx.fillStyle = g; ctx.fill(); break }
+    case 7: for (let i = 0; i < n; i++) { const v = spec[i] || 0; ctx.fillStyle = mixColor(i / n); ctx.beginPath(); ctx.arc(i * bw + bw / 2, H - v * H, 4, 0, 6.2832); ctx.fill() } break
+    case 8: { const cx = W / 2, cy = H / 2, mr = Math.min(W, H) / 2; ctx.lineWidth = 3; for (let k = 0; k < 6; k++) { const ph = ((t + k * 10) % 60) / 60; ctx.strokeStyle = mixColor(k / 6); ctx.globalAlpha = (1 - ph) * (0.25 + avg); ctx.beginPath(); ctx.arc(cx, cy, ph * mr * (0.5 + avg * 1.2), 0, 6.2832); ctx.stroke() } ctx.globalAlpha = 1; break }
+    case 9: for (let i = 0; i < n; i++) { const bh = Math.max(2, (spec[i] || 0) * H); ctx.fillStyle = mixColor(i / n); ctx.globalAlpha = 0.85; ctx.fillRect(i * bw + bw * 0.15, H - bh, bw * 0.7, bh); ctx.globalAlpha = 1; ctx.fillStyle = '#fff'; ctx.fillRect(i * bw + bw * 0.15, H - (peaks[i] || 0) * H, bw * 0.7, 2) } break
+    default: break
+  }
+}
+
+// Live audio-spectrum canvas. Tap to cycle through 10 visualizations (persisted).
 function Visualizer({ big }) {
-  const [spec, setSpec] = useState([])
+  const wrapRef = useRef(null), canvasRef = useRef(null)
+  const specRef = useRef(new Array(32).fill(0))
+  const peaksRef = useRef(new Array(32).fill(0))
+  const [mode, setMode] = useState(() => (Number(localStorage.getItem('helm.vis') || 0) || 0) % VIS_MODES.length)
+  const [flash, setFlash] = useState('')
+
   useEffect(() => {
     let es
-    try {
-      es = new EventSource(`${SVC}/api/spectrum`)
-      es.onmessage = (e) => { try { setSpec(JSON.parse(e.data)) } catch (err) {} }
-    } catch (err) {}
+    try { es = new EventSource(`${SVC}/api/spectrum`); es.onmessage = (e) => { try { specRef.current = JSON.parse(e.data) } catch (x) {} } } catch (x) {}
     return () => es && es.close()
   }, [])
-  const data = spec.length ? spec : new Array(32).fill(0)
+
+  useEffect(() => {
+    let raf, t = 0
+    const loop = () => {
+      const cv = canvasRef.current, wrap = wrapRef.current
+      if (cv && wrap && wrap.clientWidth) {
+        const dpr = window.devicePixelRatio || 1
+        const W = wrap.clientWidth, H = wrap.clientHeight
+        if (cv.width !== Math.round(W * dpr)) cv.width = Math.round(W * dpr)
+        if (cv.height !== Math.round(H * dpr)) cv.height = Math.round(H * dpr)
+        const ctx = cv.getContext('2d')
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+        ctx.clearRect(0, 0, W, H)
+        const spec = specRef.current, peaks = peaksRef.current
+        for (let i = 0; i < spec.length; i++) peaks[i] = Math.max(spec[i] || 0, (peaks[i] || 0) - 0.012)
+        drawVis(mode, ctx, W, H, spec, peaks, t)
+        t++
+      }
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [mode])
+
+  const cycle = () => {
+    const m = (mode + 1) % VIS_MODES.length
+    setMode(m); localStorage.setItem('helm.vis', String(m))
+    setFlash(VIS_MODES[m]); setTimeout(() => setFlash(''), 1200)
+  }
+
   return (
-    <Box sx={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
-      gap: big ? '4px' : '2px', height: big ? 150 : 44, width: '100%' }}>
-      {data.map((v, i) => (
-        <Box key={i} sx={{ flex: 1, maxWidth: big ? 16 : 7, height: `${Math.max(2, v * 100)}%`,
-          borderRadius: '3px 3px 0 0', background: 'linear-gradient(to top,#1f6feb,#3ddc84)',
-          transition: 'height 70ms linear' }} />
-      ))}
+    <Box ref={wrapRef} onClick={cycle} sx={{ position: 'relative', width: '100%', height: big ? 170 : 44, cursor: 'pointer' }}>
+      <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+      {big && (
+        <Typography sx={{ position: 'absolute', top: 4, right: 10, fontSize: '0.8rem',
+          opacity: flash ? 0.95 : 0.35, transition: 'opacity .3s', pointerEvents: 'none' }}>
+          {flash || `${VIS_MODES[mode]} · tap to change`}
+        </Typography>
+      )}
     </Box>
   )
 }
