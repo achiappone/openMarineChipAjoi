@@ -268,10 +268,23 @@ export default function StereoView({ big = false }) {
   const volume = (
     <Stack direction="row" alignItems="center" spacing={big ? 2.5 : 1.5}>
       <IconButton size={big ? 'large' : 'small'} onClick={() => c.toggleMute()}>
-        {s.muted ? <VolumeOffIcon sx={{ fontSize: big ? 36 : 24 }} /> : <VolumeUpIcon sx={{ fontSize: big ? 36 : 24 }} />}
+        {s.muted ? <VolumeOffIcon sx={{ fontSize: big ? 40 : 24 }} /> : <VolumeUpIcon sx={{ fontSize: big ? 40 : 24 }} />}
       </IconButton>
-      <Slider value={s.muted ? 0 : s.volume} min={0} max={VOL_MAX} onChange={(_, v) => c.setVolume(v)} valueLabelDisplay="auto" sx={{ flex: 1 }} />
-      <Typography sx={{ width: big ? 48 : 30, textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontSize: big ? '1.5rem' : undefined }}>
+      <Slider
+        value={s.muted ? 0 : s.volume} min={0} max={VOL_MAX} step={1}
+        onChange={(_, v) => c.setVolume(v)} valueLabelDisplay="auto"
+        sx={{
+          flex: 1,
+          py: big ? 2.5 : 1.25, // bigger vertical touch target
+          '& .MuiSlider-thumb': {
+            width: big ? 44 : 24, height: big ? 44 : 24,
+            '&:hover, &.Mui-focusVisible': { boxShadow: '0 0 0 10px rgba(57,160,255,0.16)' },
+          },
+          '& .MuiSlider-rail, & .MuiSlider-track': { height: big ? 18 : 9, borderRadius: 10 },
+          '& .MuiSlider-valueLabel': { fontSize: big ? '1.1rem' : undefined },
+        }}
+      />
+      <Typography sx={{ width: big ? 56 : 30, textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontSize: big ? '1.7rem' : undefined, fontWeight: big ? 700 : 400 }}>
         {s.muted ? 'M' : s.volume}
       </Typography>
     </Stack>
