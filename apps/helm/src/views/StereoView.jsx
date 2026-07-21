@@ -19,6 +19,10 @@ import AddIcon from '@mui/icons-material/Add'
 import RemoveIcon from '@mui/icons-material/Remove'
 import BluetoothIcon from '@mui/icons-material/Bluetooth'
 import BluetoothSearchingIcon from '@mui/icons-material/BluetoothSearching'
+import BatteryFullIcon from '@mui/icons-material/BatteryFull'
+import Battery60Icon from '@mui/icons-material/Battery60'
+import Battery20Icon from '@mui/icons-material/Battery20'
+import BatteryAlertIcon from '@mui/icons-material/BatteryAlert'
 import { SOURCES, FM_MIN, FM_MAX, VOL_MAX } from '../stereo/stereoControl'
 import { createRadioClient } from '../stereo/stereoClient'
 
@@ -404,15 +408,30 @@ export default function StereoView({ big = false }) {
     </Box>
   )
   // Compact current-device + battery strip; full device list/pairing lives in a modal.
+  const batLvl = bt.connected ? bt.connected.battery : null
+  const batIcon = (() => {
+    if (batLvl == null) return null
+    const isx = { transform: 'rotate(90deg)', fontSize: big ? 28 : 20, color: batLvl <= 15 ? 'error.main' : batLvl <= 30 ? 'warning.main' : 'success.main' }
+    if (batLvl <= 15) return <BatteryAlertIcon sx={isx} />
+    if (batLvl <= 40) return <Battery20Icon sx={isx} />
+    if (batLvl <= 75) return <Battery60Icon sx={isx} />
+    return <BatteryFullIcon sx={isx} />
+  })()
   const btDeviceStrip = (
-    <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: big ? 2 : 1 }}>
+    <Stack direction="row" alignItems="center" spacing={big ? 1.25 : 0.75} sx={{ mb: big ? 2 : 1 }}>
       <BluetoothIcon sx={{ color: bt.connected ? 'primary.light' : 'text.disabled' }} />
+      {batLvl != null && (
+        <Stack direction="row" alignItems="center" spacing={0.25} sx={{ mr: 0.5 }}>
+          {batIcon}
+          <Typography sx={{ fontSize: big ? '1rem' : '0.8rem', fontWeight: 600 }}>{batLvl}%</Typography>
+        </Stack>
+      )}
       <Box sx={{ flex: 1, minWidth: 0 }}>
         <Typography noWrap sx={{ fontWeight: 700, fontSize: big ? '1.3rem' : '1rem' }}>
           {bt.connected ? bt.connected.name : ((bt.devices || [])[0]?.name || 'No device')}
         </Typography>
         <Typography sx={{ fontSize: big ? '1rem' : '0.8rem', opacity: 0.7 }}>
-          {bt.connected ? (bt.connected.battery != null ? `Connected · Battery ${bt.connected.battery}%` : 'Connected') : 'Not connected'}
+          {bt.connected ? 'Connected' : 'Not connected'}
         </Typography>
       </Box>
       <Button variant="outlined" size={big ? 'medium' : 'small'} startIcon={<BluetoothSearchingIcon />} onClick={() => setBtDevOpen(true)}>Devices</Button>
