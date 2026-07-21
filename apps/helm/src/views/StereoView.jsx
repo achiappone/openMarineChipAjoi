@@ -285,11 +285,14 @@ export default function StereoView({ big = false }) {
     </Box>
   )
 
+  const volStep = (d) => c.setVolume(Math.max(0, Math.min(VOL_MAX, (s.muted ? 0 : s.volume) + d)))
+  const volBtnSx = { border: '2px solid rgba(255,255,255,0.22)', borderRadius: 2, p: big ? 1.2 : 0.4, '&:hover': { borderColor: 'primary.main' } }
   const volume = (
-    <Stack direction="row" alignItems="center" spacing={big ? 2.5 : 1.5}>
+    <Stack direction="row" alignItems="center" spacing={big ? 1.5 : 0.75}>
       <IconButton size={big ? 'large' : 'small'} onClick={() => c.toggleMute()}>
         {s.muted ? <VolumeOffIcon sx={{ fontSize: big ? 40 : 24 }} /> : <VolumeUpIcon sx={{ fontSize: big ? 40 : 24 }} />}
       </IconButton>
+      <IconButton onClick={() => volStep(-1)} sx={volBtnSx}><RemoveIcon sx={{ fontSize: big ? 34 : 20 }} /></IconButton>
       <Slider
         value={s.muted ? 0 : s.volume} min={0} max={VOL_MAX} step={1}
         onChange={(_, v) => c.setVolume(v)} valueLabelDisplay="auto"
@@ -304,6 +307,7 @@ export default function StereoView({ big = false }) {
           '& .MuiSlider-valueLabel': { fontSize: big ? '1.1rem' : undefined },
         }}
       />
+      <IconButton onClick={() => volStep(1)} sx={volBtnSx}><AddIcon sx={{ fontSize: big ? 34 : 20 }} /></IconButton>
       <Typography sx={{ width: big ? 56 : 30, textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontSize: big ? '1.7rem' : undefined, fontWeight: big ? 700 : 400 }}>
         {s.muted ? 'M' : s.volume}
       </Typography>
