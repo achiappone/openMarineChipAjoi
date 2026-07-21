@@ -2,6 +2,7 @@
 // No dependencies (Node built-ins only). Plays FM out the Pi aux, taps the audio
 // for a live spectrum (streamed over SSE), and exposes tuner controls + settings.
 const http = require('http')
+const https = require('https')
 const fs = require('fs')
 const { spawn, execSync } = require('child_process')
 
@@ -233,6 +234,28 @@ function btScan() {
     state.bluetooth.connected = connected
   } catch (e) { state.bluetooth.available = true }
 }
+// Album art: BlueZ doesn't expose AVRCP cover art, so look it up online from the
+// artist+title via the free iTunes Search API (Pi has internet). Cached per track.
+const artCache = {}
+function fetchArt(artist, title) {
+  const key = `${artist}|${title}`.toLowerCase()
+  if (key in artCache) return
+  artCache[key] = null // pending
+  const url = `https://itunes.apple.com/search?term=${encodeURIComponent(`${artist} ${title}`)}&media=music&entity=song&limit=1`
+  https.get(url, (res) => {
+    let d = ''
+    res.on('data', (c) => (d += c))
+    res.on('end', () => {
+      try {
+        const r = JSON.parse(d).results
+        let art = r && r[0] && r[0].artworkUrl100
+        if (art) art = art.replace('100x100bb', '600x600bb')
+        artCache[key] = art || null
+      } catch (e) { artCache[key] = null }
+    })
+  }).on('error', () => { artCache[key] = null })
+}
+
 // AVRCP track metadata from BlueZ's system D-Bus (no extra deps).
 let btPlayerPath = ''
 function btField(out, key) {
@@ -255,7 +278,11 @@ function btTrack() {
     const title = btField(out, 'Title'), artist = btField(out, 'Artist'), album = btField(out, 'Album')
     let status = ''
     try { status = execSync(`busctl --system get-property org.bluez ${btPlayerPath} org.bluez.MediaPlayer1 Status 2>/dev/null`, { encoding: 'utf8' }).replace(/.*"(.*)".*/, '$1').trim() } catch (e) {}
-    state.bluetooth.track = (title || artist) ? { title, artist, album, status } : null
+    if (title || artist) {
+      const key = `${artist}|${title}`.toLowerCase()
+      if (!(key in artCache)) fetchArt(artist, title)
+      state.bluetooth.track = { title, artist, album, status, artUrl: artCache[key] || null }
+    } else state.bluetooth.track = null
   } catch (e) { btPlayerPath = ''; state.bluetooth.track = null }
 }
 setInterval(() => { if (state.source === 'Bluetooth' || state.bluetooth.pairing) { btScan(); btTrack() } }, 3000)

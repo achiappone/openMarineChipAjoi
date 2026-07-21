@@ -357,19 +357,26 @@ export default function StereoView({ big = false }) {
         </Typography>
       </Stack>
       {bt.track ? (
-        <Box sx={{ bgcolor: 'rgba(57,160,255,0.12)', border: '1px solid rgba(57,160,255,0.4)', borderRadius: 2, p: big ? 2.5 : 1.5 }}>
-          <Typography noWrap sx={{ fontWeight: 800, color: '#fff', lineHeight: 1.1, fontSize: big ? '2.6rem' : '1.3rem' }}>
-            {bt.track.title || '—'}
-          </Typography>
-          {bt.track.artist && (
-            <Typography noWrap sx={{ color: 'primary.light', fontWeight: 700, mt: 0.5, fontSize: big ? '1.7rem' : '1rem' }}>
-              {bt.track.artist}
+        <Stack direction="row" spacing={big ? 3 : 1.5} alignItems="center"
+          sx={{ bgcolor: 'rgba(57,160,255,0.12)', border: '1px solid rgba(57,160,255,0.4)', borderRadius: 2, p: big ? 2.5 : 1.5 }}>
+          {bt.track.artUrl && (
+            <Box component="img" src={bt.track.artUrl} alt=""
+              sx={{ width: big ? 150 : 60, height: big ? 150 : 60, borderRadius: 1.5, flexShrink: 0, objectFit: 'cover' }} />
+          )}
+          <Box sx={{ minWidth: 0, flex: 1, textAlign: bt.track.artUrl ? 'left' : 'center' }}>
+            <Typography noWrap sx={{ fontWeight: 800, color: '#fff', lineHeight: 1.1, fontSize: big ? '2.4rem' : '1.3rem' }}>
+              {bt.track.title || '—'}
             </Typography>
-          )}
-          {bt.track.album && (
-            <Typography noWrap sx={{ opacity: 0.7, fontSize: big ? '1.2rem' : '0.85rem', mt: 0.25 }}>{bt.track.album}</Typography>
-          )}
-        </Box>
+            {bt.track.artist && (
+              <Typography noWrap sx={{ color: 'primary.light', fontWeight: 700, mt: 0.5, fontSize: big ? '1.6rem' : '1rem' }}>
+                {bt.track.artist}
+              </Typography>
+            )}
+            {bt.track.album && (
+              <Typography noWrap sx={{ opacity: 0.7, fontSize: big ? '1.2rem' : '0.85rem', mt: 0.25 }}>{bt.track.album}</Typography>
+            )}
+          </Box>
+        </Stack>
       ) : (
         <Typography sx={{ opacity: 0.6, fontSize: big ? '1.5rem' : '1rem', py: big ? 4 : 2 }}>
           {bt.connected ? 'Play something on your phone' : 'Tap "Pair New Phone"'}
