@@ -13,6 +13,8 @@ import SettingsIcon from '@mui/icons-material/Settings'
 import ArrowBackIcon from '@mui/icons-material/ArrowBack'
 import AddIcon from '@mui/icons-material/Add'
 import RemoveIcon from '@mui/icons-material/Remove'
+import BluetoothIcon from '@mui/icons-material/Bluetooth'
+import BluetoothSearchingIcon from '@mui/icons-material/BluetoothSearching'
 import { SOURCES, FM_MIN, FM_MAX, VOL_MAX } from '../stereo/stereoControl'
 import { createRadioClient } from '../stereo/stereoClient'
 
@@ -247,15 +249,21 @@ export default function StereoView({ big = false }) {
         </Typography>
         <NavCard onClick={() => c.seek(1)} big><FastForwardIcon sx={{ fontSize: big ? 44 : 22 }} /></NavCard>
       </Stack>
-      {/* RDS station info decoded over the air */}
-      <Box sx={{ textAlign: 'center', minHeight: big ? 52 : 20, mt: big ? 0.5 : 0 }}>
-        {s.nowPlaying?.title && (
-          <Typography noWrap sx={{ fontWeight: 700, color: 'primary.light', fontSize: big ? '1.7rem' : '1rem' }}>
+      {/* RDS station info decoded over the air — station name (1 line) + full message (wraps) */}
+      <Box sx={{ textAlign: 'center', minHeight: big ? 128 : 30, mt: big ? 1 : 0.25,
+        display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: big ? 0.75 : 0.25 }}>
+        {s.nowPlaying?.title ? (
+          <Typography noWrap sx={{ fontWeight: 800, color: '#fff', lineHeight: 1.05, fontSize: big ? '3.2rem' : '1.3rem' }}>
             {s.nowPlaying.title}
           </Typography>
-        )}
-        {big && s.nowPlaying?.artist && (
-          <Typography noWrap sx={{ opacity: 0.7, fontSize: '1rem' }}>{s.nowPlaying.artist}</Typography>
+        ) : s.power ? (
+          <Typography sx={{ opacity: 0.4, fontSize: big ? '1.3rem' : '0.85rem' }}>searching for station info…</Typography>
+        ) : null}
+        {s.nowPlaying?.artist && (
+          <Typography sx={{ opacity: 0.85, fontSize: big ? '1.5rem' : '0.9rem', lineHeight: 1.3,
+            display: '-webkit-box', WebkitLineClamp: big ? 4 : 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+            {s.nowPlaying.artist}
+          </Typography>
         )}
       </Box>
       <Slider size={big ? 'medium' : 'small'} value={s.fm.freq} min={FM_MIN} max={FM_MAX} step={0.1}
@@ -314,8 +322,71 @@ export default function StereoView({ big = false }) {
     </Stack>
   )
 
+  // Vertical volume column for the big layout (+ on top, − on bottom).
+  const volumeVertical = (
+    <>
+      <IconButton onClick={() => c.toggleMute()}>
+        {s.muted ? <VolumeOffIcon sx={{ fontSize: 34 }} /> : <VolumeUpIcon sx={{ fontSize: 34 }} />}
+      </IconButton>
+      <IconButton onClick={() => volStep(1)} sx={volBtnSx}><AddIcon sx={{ fontSize: 32 }} /></IconButton>
+      <Slider orientation="vertical" value={s.muted ? 0 : s.volume} min={0} max={VOL_MAX} step={1}
+        onChange={(_, v) => c.setVolume(v)} valueLabelDisplay="auto"
+        sx={{ flex: 1, my: 1, '& .MuiSlider-thumb': { width: 42, height: 42 }, '& .MuiSlider-rail, & .MuiSlider-track': { width: 18, borderRadius: 10 } }} />
+      <IconButton onClick={() => volStep(-1)} sx={volBtnSx}><RemoveIcon sx={{ fontSize: 32 }} /></IconButton>
+      <Typography sx={{ fontSize: '1.7rem', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{s.muted ? 'M' : s.volume}</Typography>
+    </>
+  )
+
   const dialog = <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)}
     settings={s.settings} onChange={(patch) => c.setSettings(patch)} />
+
+  // ---- source-aware content (FM tuner+presets, Bluetooth device mgmt, Aux) ----
+  const isFM = s.source === 'FM'
+  const bt = s.bluetooth || {}
+  const btNowPlaying = (
+    <Box sx={{ textAlign: 'center', py: big ? 4 : 2 }}>
+      <BluetoothIcon sx={{ fontSize: big ? 72 : 40, color: bt.connected ? 'primary.light' : 'text.disabled' }} />
+      <Typography noWrap sx={{ fontWeight: 800, fontSize: big ? '2.4rem' : '1.2rem', mt: 1 }}>
+        {bt.track?.title || (bt.connected ? bt.connected.name : 'Bluetooth')}
+      </Typography>
+      <Typography noWrap sx={{ opacity: 0.75, fontSize: big ? '1.4rem' : '0.9rem' }}>
+        {bt.track?.artist || (bt.connected ? 'Streaming' : 'No device connected')}
+      </Typography>
+    </Box>
+  )
+  const auxMain = (
+    <Box sx={{ textAlign: 'center', py: big ? 6 : 2 }}>
+      <Typography sx={{ fontWeight: 800, fontSize: big ? '2.4rem' : '1.2rem' }}>Aux Input</Typography>
+      <Typography sx={{ opacity: 0.7 }}>Line in via the 3.5mm jack</Typography>
+    </Box>
+  )
+  const bluetoothPanel = (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Typography variant={big ? 'h5' : 'h6'} sx={{ fontWeight: 800 }}>Devices</Typography>
+      {bt.connected ? (
+        <Paper variant="outlined" sx={{ p: 2 }}>
+          <Typography sx={{ fontWeight: 700, fontSize: big ? '1.5rem' : '1.05rem' }}>{bt.connected.name || 'Phone'}</Typography>
+          <Typography sx={{ color: 'success.main' }}>Connected</Typography>
+          <Button sx={{ mt: 1 }} onClick={() => c.btDisconnect && c.btDisconnect()}>Disconnect</Button>
+        </Paper>
+      ) : (
+        <Typography sx={{ opacity: 0.6 }}>No phone connected</Typography>
+      )}
+      <Button variant="contained" size="large" startIcon={<BluetoothSearchingIcon />}
+        onClick={() => c.btPair && c.btPair()} sx={{ py: 1.4, fontSize: big ? '1.15rem' : undefined }}>
+        Pair New Phone
+      </Button>
+      {(bt.devices || []).map((d) => (
+        <Button key={d.mac || d.name} variant="outlined" fullWidth sx={{ justifyContent: 'flex-start', py: 1 }}
+          onClick={() => c.btConnect && c.btConnect(d.mac)}>{d.name}</Button>
+      ))}
+      {!bt.available && <Typography sx={{ opacity: 0.4, fontSize: '0.85rem', mt: 1 }}>Bluetooth audio backend is being set up.</Typography>}
+    </Box>
+  )
+  const leftMain = isFM ? tuner : s.source === 'Bluetooth' ? btNowPlaying : auxMain
+  const middlePanel = isFM ? presets : s.source === 'Bluetooth' ? bluetoothPanel : (
+    <Box sx={{ opacity: 0.5, p: 2 }}>No presets for {s.source}.</Box>
+  )
 
   if (!big) {
     return (
@@ -323,7 +394,7 @@ export default function StereoView({ big = false }) {
         <Stack spacing={1.25} sx={{ maxWidth: 640, mx: 'auto' }}>
           {header}
           <Paper sx={{ p: 1.25, opacity: off ? 0.45 : 1, pointerEvents: off ? 'none' : 'auto', transition: '0.2s' }}>
-            <Stack spacing={1.5}>{sourceToggle}{tuner}{presets}{volume}</Stack>
+            <Stack spacing={1.5}>{sourceToggle}{leftMain}{middlePanel}{volume}</Stack>
           </Paper>
         </Stack>
         {dialog}
@@ -333,17 +404,20 @@ export default function StereoView({ big = false }) {
 
   return (
     <Box sx={{ height: '100%', overflow: 'auto', p: 3 }}>
-      <Stack spacing={2.5} sx={{ maxWidth: 1500, mx: 'auto', height: '100%' }}>
+      <Stack spacing={2.5} sx={{ maxWidth: '100%', mx: 'auto', height: '100%' }}>
         {header}
-        <Box sx={{ flex: 1, display: 'grid', gridTemplateColumns: '1.15fr 1fr', gap: 3, minHeight: 0 }}>
+        <Box sx={{ flex: 1, display: 'grid', gridTemplateColumns: '1.3fr 1fr 132px', gap: 3, minHeight: 0 }}>
           <Paper sx={{ p: 3, opacity: off ? 0.5 : 1, pointerEvents: off ? 'none' : 'auto', transition: '0.2s',
             display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 3 }}>
-            {sourceToggle}{tuner}<Visualizer big />
+            {sourceToggle}{leftMain}<Visualizer big />
           </Paper>
           <Paper sx={{ p: 3, opacity: off ? 0.5 : 1, pointerEvents: off ? 'none' : 'auto', transition: '0.2s',
-            display: 'flex', flexDirection: 'column', gap: 3 }}>
-            <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>{presets}</Box>
-            {volume}
+            display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>{middlePanel}</Box>
+          </Paper>
+          <Paper sx={{ p: 2, opacity: off ? 0.5 : 1, pointerEvents: off ? 'none' : 'auto', transition: '0.2s',
+            display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            {volumeVertical}
           </Paper>
         </Box>
       </Stack>

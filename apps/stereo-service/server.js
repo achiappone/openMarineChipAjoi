@@ -41,6 +41,7 @@ const state = {
   fm: { freq: 101.5, presets: [] },
   nowPlaying: { title: 'FM Radio', artist: '' },
   settings: { gain: Number(RTL_GAIN) || 40, deemp: true, squelch: 0, ppm: 0, filter: true }, // gain<0 = auto
+  bluetooth: { available: false, connected: null, devices: [], track: null }, // A2DP sink — backend TBD
 }
 state.fm.presets = loadPresets()
 let spectrum = new Array(NBANDS).fill(0)
@@ -117,6 +118,28 @@ function applyVolume() {
   spawn('amixer', ['-c', MIXER_CARD, 'sset', MIXER_CTL, `${pct}%`], { stdio: 'ignore' })
 }
 
+// US stations scroll ad/song text through the 8-char PS field, so a single PS frame
+// is a fragment ("rneys.7"). Keep the frame that recurs as a stable station name
+// (title), and reassemble the scrolling segments into a full message (artist).
+let psFreq = {}, psBuilding = [], psComplete = '', rtText = ''
+function rdsMessage() { return rtText || psComplete || psBuilding.join(' ') }
+function resetRds() { psFreq = {}; psBuilding = []; psComplete = ''; rtText = ''; rdsBuf = '' }
+function notePs(raw) {
+  const t = String(raw).replace(/\s+/g, ' ').trim()
+  if (!t) return
+  psFreq[t] = (psFreq[t] || 0) + 1
+  let best = null, n = 1 // most-frequent frame = the call sign (scroll fragments are transient)
+  for (const k in psFreq) if (psFreq[k] > n) { n = psFreq[k]; best = k }
+  state.nowPlaying.title = best || t
+  // reassemble scrolling segments in order; a full cycle completes when it loops
+  const last = psBuilding[psBuilding.length - 1]
+  if (t !== last) {
+    if (psBuilding.length >= 2 && t === psBuilding[0]) { psComplete = psBuilding.join(' '); psBuilding = [t] }
+    else { psBuilding.push(t); if (psBuilding.length > 24) { psComplete = psBuilding.join(' '); psBuilding = [t] } }
+  }
+  state.nowPlaying.artist = rdsMessage()
+}
+
 // Parse redsea's JSON lines; pull the station name (ps) and radio text.
 function parseRds(d) {
   rdsBuf += d.toString()
@@ -126,8 +149,8 @@ function parseRds(d) {
     if (!line) continue
     try {
       const j = JSON.parse(line)
-      if (j.ps && j.ps.trim()) state.nowPlaying.title = j.ps.trim()
-      if (j.radiotext && j.radiotext.trim()) state.nowPlaying.artist = j.radiotext.trim()
+      if (j.ps) notePs(j.ps)
+      if (j.radiotext && j.radiotext.trim()) { rtText = j.radiotext.trim(); state.nowPlaying.artist = rdsMessage() }
     } catch (e) {}
   }
 }
@@ -148,6 +171,7 @@ function scheduleStart() {
     if (!state.power || state.source !== 'FM') return
     const st = state.settings, f = state.fm.freq.toFixed(1)
     state.nowPlaying = { title: '', artist: '' } // clear RDS from the previous station
+    resetRds()
     // rtl_fm -M fm @171k = raw FM multiplex (audio 0-15k + RDS subcarrier @57k)
     const args = ['-f', `${f}M`, '-M', 'fm', '-l', String(st.squelch || 0), '-A', 'std', '-p', String(st.ppm || 0), '-s', String(MPX_RATE)]
     if (st.filter) args.push('-F', '9')

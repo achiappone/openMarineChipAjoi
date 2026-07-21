@@ -76,14 +76,14 @@ export default function App() {
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       {/* Surfaces — all mounted, positioned per tab */}
-      <Box sx={{ position: 'relative', flex: 1 }}>
+      <Box sx={{ position: 'relative', flex: 1, minHeight: 0, overflow: 'hidden' }}>
         <Surface rect={L.plotter}><EmbeddedApp src={FREEBOARD} title="Plotter (Freeboard-SK)" /></Surface>
         <Surface rect={L.instruments}><EmbeddedApp src={KIP} title="Instruments (KIP)" /></Surface>
         <Surface rect={L.stereo}><StereoView big={tab === 'stereo'} /></Surface>
       </Box>
 
       {/* Page buttons — bottom bar, right-aligned */}
-      <Stack direction="row" alignItems="center" sx={{ bgcolor: 'background.paper', borderTop: '1px solid rgba(255,255,255,0.12)' }}>
+      <Stack direction="row" alignItems="center" sx={{ flexShrink: 0, bgcolor: 'background.paper', borderTop: '1px solid rgba(255,255,255,0.12)' }}>
         <Chip
           size="small"
           color={sk.connected ? (sk.deltas > 0 ? 'success' : 'info') : 'default'}
@@ -94,7 +94,7 @@ export default function App() {
         <Box sx={{ flex: 1 }} />
         <Tabs
           value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" scrollButtons={false}
-          sx={{ minHeight: 52, '& .MuiTab-root': { minHeight: 52, py: 0, fontSize: '1.02rem', fontWeight: 700 } }}
+          sx={{ minHeight: 68, '& .MuiTab-root': { minHeight: 68, px: 3.5, py: 0, fontSize: '1.35rem', fontWeight: 800 } }}
         >
           {TABS.map((t) => <Tab key={t.id} value={t.id} label={t.label} />)}
         </Tabs>
