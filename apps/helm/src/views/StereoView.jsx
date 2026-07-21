@@ -238,8 +238,19 @@ export default function StereoView({ big = false }) {
         </Typography>
         <NavCard onClick={() => c.seek(1)} big><FastForwardIcon sx={{ fontSize: big ? 44 : 22 }} /></NavCard>
       </Stack>
+      {/* RDS station info decoded over the air */}
+      <Box sx={{ textAlign: 'center', minHeight: big ? 52 : 20, mt: big ? 0.5 : 0 }}>
+        {s.nowPlaying?.title && (
+          <Typography noWrap sx={{ fontWeight: 700, color: 'primary.light', fontSize: big ? '1.7rem' : '1rem' }}>
+            {s.nowPlaying.title}
+          </Typography>
+        )}
+        {big && s.nowPlaying?.artist && (
+          <Typography noWrap sx={{ opacity: 0.7, fontSize: '1rem' }}>{s.nowPlaying.artist}</Typography>
+        )}
+      </Box>
       <Slider size={big ? 'medium' : 'small'} value={s.fm.freq} min={FM_MIN} max={FM_MAX} step={0.1}
-        onChange={(_, v) => c.tune(v)} valueLabelDisplay="auto" sx={{ mt: big ? 1.5 : 0 }} />
+        onChange={(_, v) => c.tune(v)} valueLabelDisplay="auto" sx={{ mt: big ? 1 : 0 }} />
     </Box>
   ) : (
     <Typography align="center" sx={{ py: big ? 6 : 1.5, opacity: 0.7, fontSize: big ? '1.4rem' : undefined }}>

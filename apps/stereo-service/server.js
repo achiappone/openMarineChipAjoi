@@ -14,6 +14,8 @@ const PRESETS_FILE = `${__dirname}/presets.json`
 const RATE = 48000
 const FFT_SIZE = 1024
 const NBANDS = 32
+const MPX_RATE = 171000 // rtl_fm -M fm output; wide enough for the 57 kHz RDS subcarrier
+const REDSEA = process.env.REDSEA || '/home/pi/build/redsea/build/redsea'
 
 const DEFAULT_PRESETS = [88.5, 93.7, 101.5, 104.3, 107.9]
 function loadPresets() {
@@ -98,19 +100,34 @@ function computeSpectrum() {
 }
 function clearSpectrum() { spectrum = new Array(NBANDS).fill(0); samples = [] }
 
-// ---- FM pipeline (rtl_fm -> tap -> aplay) ----
-let rtlProc = null, aplayProc = null, restartTimer = null
+// ---- FM pipeline: rtl_fm (-M fm MPX) -> tee -> { redsea (RDS), sox (deemph+resample) -> aplay } ----
+let rtlProc = null, aplayProc = null, soxProc = null, redseaProc = null, restartTimer = null, rdsBuf = ''
 
 function applyVolume() {
   const pct = state.muted ? 0 : Math.round((state.volume / 30) * 90)
   spawn('amixer', ['-c', MIXER_CARD, 'sset', MIXER_CTL, `${pct}%`], { stdio: 'ignore' })
 }
 
+// Parse redsea's JSON lines; pull the station name (ps) and radio text.
+function parseRds(d) {
+  rdsBuf += d.toString()
+  let nl
+  while ((nl = rdsBuf.indexOf('\n')) >= 0) {
+    const line = rdsBuf.slice(0, nl).trim(); rdsBuf = rdsBuf.slice(nl + 1)
+    if (!line) continue
+    try {
+      const j = JSON.parse(line)
+      if (j.ps && j.ps.trim()) state.nowPlaying.title = j.ps.trim()
+      if (j.radiotext && j.radiotext.trim()) state.nowPlaying.artist = j.radiotext.trim()
+    } catch (e) {}
+  }
+}
+
 function killPipeline() {
-  try { if (rtlProc) rtlProc.kill('SIGTERM') } catch (e) {}
-  try { if (aplayProc) aplayProc.kill('SIGTERM') } catch (e) {}
-  rtlProc = null; aplayProc = null
-  try { execSync('pkill -f rtl_fm 2>/dev/null; pkill -f "aplay .*Headphones" 2>/dev/null; true', { stdio: 'ignore' }) } catch (e) {}
+  for (const p of [rtlProc, redseaProc, soxProc, aplayProc]) { try { if (p) p.kill('SIGTERM') } catch (e) {} }
+  rtlProc = aplayProc = soxProc = redseaProc = null; rdsBuf = ''
+  // backstop by exact process name (-x never self-matches the shell running it)
+  try { execSync('pkill -x rtl_fm; pkill -x redsea; pkill -x sox; pkill -x aplay; true', { stdio: 'ignore' }) } catch (e) {}
   clearSpectrum()
 }
 
@@ -121,23 +138,37 @@ function scheduleStart() {
   restartTimer = setTimeout(() => {
     if (!state.power || state.source !== 'FM') return
     const st = state.settings, f = state.fm.freq.toFixed(1)
-    const args = ['-f', `${f}M`, '-M', 'wbfm', '-s', '200000', '-r', String(RATE)]
+    state.nowPlaying = { title: '', artist: '' } // clear RDS from the previous station
+    // rtl_fm -M fm @171k = raw FM multiplex (audio 0-15k + RDS subcarrier @57k)
+    const args = ['-f', `${f}M`, '-M', 'fm', '-l', String(st.squelch || 0), '-A', 'std', '-p', String(st.ppm || 0), '-s', String(MPX_RATE)]
     if (st.filter) args.push('-F', '9')
-    if (st.deemp) args.push('-E', 'deemp')
-    args.push('-l', String(st.squelch || 0), '-p', String(st.ppm || 0))
     if (st.gain >= 0) args.push('-g', String(st.gain))
     args.push('-')
     rtlProc = spawn('rtl_fm', args, { stdio: ['ignore', 'pipe', 'ignore'] })
-    aplayProc = spawn('aplay', ['-q', '-r', String(RATE), '-f', 'S16_LE', '-t', 'raw', '-c', '1', '-D', AUDIO_DEV],
-      { stdio: ['pipe', 'ignore', 'ignore'] })
-    rtlProc.stdout.pipe(aplayProc.stdin)
-    rtlProc.stdout.on('data', pushAudio)
-    aplayProc.stdin.on('error', () => {})
+    // RDS decoder reads the raw MPX
+    redseaProc = spawn(REDSEA, ['-r', String(MPX_RATE)], { stdio: ['pipe', 'pipe', 'ignore'] })
+    redseaProc.stdout.on('data', parseRds)
+    redseaProc.stdin.on('error', () => {}); redseaProc.on('error', () => {})
+    // audio: 75us de-emphasis (1-pole @2122Hz) + 16k lowpass + resample 171k->48k
+    const deemp = st.deemp ? ['lowpass', '-1', '2122'] : []
+    soxProc = spawn('sox', ['-t', 'raw', '-r', String(MPX_RATE), '-e', 'signed', '-b', '16', '-c', '1', '-',
+      '-t', 'raw', '-r', String(RATE), '-e', 'signed', '-b', '16', '-c', '1', '-',
+      ...deemp, 'lowpass', '16000', 'gain', '4'], { stdio: ['pipe', 'pipe', 'ignore'] })
+    soxProc.stdin.on('error', () => {}); soxProc.on('error', () => {})
+    aplayProc = spawn('aplay', ['-q', '-r', String(RATE), '-f', 'S16_LE', '-t', 'raw', '-c', '1', '-D', AUDIO_DEV], { stdio: ['pipe', 'ignore', 'ignore'] })
+    soxProc.stdout.pipe(aplayProc.stdin)
+    soxProc.stdout.on('data', pushAudio) // FFT tap on clean 48k audio
+    aplayProc.stdin.on('error', () => {}); aplayProc.on('error', () => {})
+    // tee the MPX to both consumers
+    rtlProc.stdout.on('data', (chunk) => {
+      if (redseaProc && redseaProc.stdin.writable) { try { redseaProc.stdin.write(chunk) } catch (e) {} }
+      if (soxProc && soxProc.stdin.writable) { try { soxProc.stdin.write(chunk) } catch (e) {} }
+    })
     rtlProc.on('error', () => {})
     setTimeout(applyVolume, 500)
-  }, 400) // short debounce: snappy retune while still coalescing rapid taps
+  }, 400)
 }
-function stopRadio() { clearTimeout(restartTimer); killPipeline() }
+function stopRadio() { clearTimeout(restartTimer); killPipeline(); state.nowPlaying = { title: 'FM Radio', artist: '' } }
 
 const clampFm = (f) => { f = Math.round(f * 10) / 10; if (f > 107.9) return 87.5; if (f < 87.5) return 107.9; return f }
 
