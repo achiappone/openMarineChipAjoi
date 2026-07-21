@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Box, Stack, Typography, ToggleButton, ToggleButtonGroup, Slider, IconButton,
-  Button, Chip, Paper, Dialog, AppBar, Toolbar, Switch, FormControlLabel, Divider, LinearProgress,
+  Button, Chip, Paper, Dialog, AppBar, Toolbar, Switch, FormControlLabel, Divider, LinearProgress, TextField,
 } from '@mui/material'
 import PlayArrowIcon from '@mui/icons-material/PlayArrow'
 import PauseIcon from '@mui/icons-material/Pause'
@@ -223,6 +223,7 @@ export default function StereoView({ big = false }) {
   const [deleteConfirm, setDeleteConfirm] = useState(null) // { i, preset } pending removal
   const ctl = useRef(null)
   const posRef = useRef({ pos: 0, at: 0, key: '' })
+  const renameRef = useRef(null)
   const [, setTick] = useState(0)
   useEffect(() => {
     ctl.current = createRadioClient(setS)
@@ -507,16 +508,21 @@ export default function StereoView({ big = false }) {
     <Box sx={{ opacity: 0.5, p: 2 }}>No presets for {s.source}.</Box>
   )
   const deleteDialog = (
-    <Dialog open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)} maxWidth="xs" fullWidth>
-      <Box sx={{ p: 3, textAlign: 'center' }}>
-        <Typography variant="h6" sx={{ fontWeight: 800, mb: 1 }}>Remove preset?</Typography>
-        <Typography sx={{ mb: 3, opacity: 0.85, fontSize: '1.3rem' }}>
-          {deleteConfirm ? `${deleteConfirm.preset.freq.toFixed(1)}${deleteConfirm.preset.name ? ' · ' + deleteConfirm.preset.name : ''}` : ''}
+    <Dialog open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)} maxWidth="xs" fullWidth
+      key={deleteConfirm ? deleteConfirm.i : 'none'}>
+      <Box sx={{ p: 3 }}>
+        <Typography variant="h6" sx={{ fontWeight: 800, mb: 2, textAlign: 'center' }}>
+          {deleteConfirm ? `${deleteConfirm.preset.freq.toFixed(1)} FM` : ''}
         </Typography>
-        <Stack direction="row" spacing={2} justifyContent="center">
-          <Button size="large" variant="outlined" onClick={() => setDeleteConfirm(null)} sx={{ px: 4, py: 1.5 }}>Cancel</Button>
-          <Button size="large" variant="contained" color="error" sx={{ px: 4, py: 1.5 }}
-            onClick={() => { c.removePreset(deleteConfirm.i); setDeleteConfirm(null) }}>Remove</Button>
+        <TextField fullWidth label="Station name" inputRef={renameRef}
+          defaultValue={deleteConfirm ? deleteConfirm.preset.name || '' : ''} sx={{ mb: 3 }}
+          placeholder="e.g. Y100" />
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Button variant="outlined" color="error" onClick={() => { c.removePreset(deleteConfirm.i); setDeleteConfirm(null) }}>Remove</Button>
+          <Stack direction="row" spacing={1.5}>
+            <Button onClick={() => setDeleteConfirm(null)}>Cancel</Button>
+            <Button variant="contained" onClick={() => { c.renamePreset(deleteConfirm.i, renameRef.current ? renameRef.current.value : ''); setDeleteConfirm(null) }}>Save</Button>
+          </Stack>
         </Stack>
       </Box>
     </Dialog>

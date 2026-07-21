@@ -38,7 +38,7 @@ function savePresets() { try { fs.writeFileSync(PRESETS_FILE, JSON.stringify(sta
 // Keep the preset for the current station fresh with the latest decoded RDS info.
 function updatePresetInfo() {
   const p = state.fm.presets.find((x) => Math.abs(x.freq - state.fm.freq) < 0.05)
-  if (!p) return
+  if (!p || p.manual) return // don't overwrite a name the user set by hand
   let changed = false
   if (state.nowPlaying.title && p.name !== state.nowPlaying.title) { p.name = state.nowPlaying.title; changed = true }
   if (state.nowPlaying.pty && p.pty !== state.nowPlaying.pty) { p.pty = state.nowPlaying.pty; changed = true }
@@ -389,6 +389,10 @@ const actions = {
     }
   },
   removePreset: (b) => { if (b.i >= 0 && b.i < state.fm.presets.length) { state.fm.presets.splice(b.i, 1); savePresets() } },
+  renamePreset: (b) => {
+    const p = state.fm.presets[b.i]
+    if (p) { const nm = String(b.name || '').slice(0, 24).trim(); p.name = nm; p.manual = !!nm; savePresets() }
+  },
   volume: (b) => { state.volume = Math.max(0, Math.min(30, Math.round(Number(b.volume)))); state.muted = false; applyVolume() },
   mute: (b) => { state.muted = !!b.muted; applyVolume() },
   settings: (b) => {

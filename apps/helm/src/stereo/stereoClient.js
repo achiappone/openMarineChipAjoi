@@ -57,6 +57,7 @@ export function createRadioClient(onChange) {
     selectPreset: (i) => { if (state && state.fm && state.fm.presets[i] != null) optimisticFreq(state.fm.presets[i]); return post('preset', { i }) },
     savePreset: (freq) => post('savePreset', freq != null ? { freq } : {}),
     removePreset: (i) => post('removePreset', { i }),
+    renamePreset: (i, name) => post('renamePreset', { i, name }),
     setSettings: (patch) => post('settings', patch),
     btPair: () => post('btPair', {}),
     btConnect: (mac) => post('btConnect', { mac }),
