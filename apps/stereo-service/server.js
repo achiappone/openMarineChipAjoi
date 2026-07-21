@@ -13,6 +13,9 @@ const RTL_GAIN = process.env.RTL_GAIN || '40'
 // The bcm2835 analog out is logarithmic; below ~this % it's inaudible (and the BT
 // transmitter has its own floor). Map the whole 1..30 slider into the usable band.
 const VOL_FLOOR_PCT = Number(process.env.VOL_FLOOR_PCT || 70)
+// How long taps must settle before the tuner actually retunes (ms). Higher = tap
+// through several stations and it only tunes once you stop; the display is instant.
+const RETUNE_DELAY = Number(process.env.RETUNE_DELAY || 900)
 const PRESETS_FILE = `${__dirname}/presets.json`
 const RATE = 48000
 const FFT_SIZE = 1024
@@ -172,7 +175,7 @@ function scheduleStart() {
     })
     rtlProc.on('error', () => {})
     setTimeout(applyVolume, 500)
-  }, 400)
+  }, RETUNE_DELAY)
 }
 function stopRadio() { clearTimeout(restartTimer); killPipeline(); state.nowPlaying = { title: 'FM Radio', artist: '' } }
 
