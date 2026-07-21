@@ -1,0 +1,13 @@
+[Unit]
+Description=openMarine Stereo control service (RTL-SDR FM)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/node /home/pi/apps/stereo-service/server.js
+Restart=on-failure
+RestartSec=2
+User=pi
+# Needs USB (rtl-sdr, via plugdev) and audio group access — pi has both.
+
+[Install]
+WantedBy=multi-user.target

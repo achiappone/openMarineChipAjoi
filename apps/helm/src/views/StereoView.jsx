@@ -8,15 +8,18 @@ import VolumeUpIcon from '@mui/icons-material/VolumeUp'
 import VolumeOffIcon from '@mui/icons-material/VolumeOff'
 import FastRewindIcon from '@mui/icons-material/FastRewind'
 import FastForwardIcon from '@mui/icons-material/FastForward'
-import { createMockStereo, SOURCES, FM_MIN, FM_MAX, VOL_MAX } from '../stereo/stereoControl'
+import { SOURCES, FM_MIN, FM_MAX, VOL_MAX } from '../stereo/stereoControl'
+import { createRadioClient } from '../stereo/stereoClient'
 
-// Custom control panel for the DIY marine stereo. Backed by a mock today; the same
-// UI drives the real FM receiver once its firmware implements the control contract.
-// Laid out to fit a short 720px-tall column and to scroll if a panel is narrower.
+// Custom control panel for the DIY marine stereo — drives the RTL-SDR FM receiver
+// via the stereo-service on the Pi. Laid out to fit a short 720px column.
 export default function StereoView() {
   const [s, setS] = useState(null)
   const ctl = useRef(null)
-  useEffect(() => { ctl.current = createMockStereo(setS) }, [])
+  useEffect(() => {
+    ctl.current = createRadioClient(setS)
+    return () => ctl.current && ctl.current.stop && ctl.current.stop()
+  }, [])
   if (!s) return null
 
   const off = !s.power
@@ -28,7 +31,7 @@ export default function StereoView() {
           <Chip
             size="small"
             color={s.connected ? 'success' : 'warning'}
-            label={s.connected ? 'connected' : 'mock'}
+            label={s.connected ? 'RTL-SDR' : 'no service'}
           />
           <ToggleButton
             value="power" selected={s.power} onChange={() => ctl.current.setPower(!s.power)}
