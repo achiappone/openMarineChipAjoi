@@ -37,6 +37,7 @@ export function createRadioClient(onChange) {
     selectPreset: (i) => post('preset', { i }),
     savePreset: (freq) => post('savePreset', freq != null ? { freq } : {}),
     removePreset: (i) => post('removePreset', { i }),
+    setSettings: (patch) => post('settings', patch),
     stop: () => clearInterval(poll),
   }
 }
