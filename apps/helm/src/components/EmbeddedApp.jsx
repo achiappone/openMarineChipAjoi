@@ -1,10 +1,12 @@
+import { memo } from 'react'
 import { Box } from '@mui/material'
 
 // Wraps an existing SignalK webapp (Freeboard, KIP) in an iframe. Because our app
 // is served from the same origin (:3000), these load with full data access and no
 // CORS. The iframe stays mounted across tab switches (App only toggles its size /
 // visibility) so the map and instruments keep their state instead of reloading.
-export default function EmbeddedApp({ src, title }) {
+// memo: never re-render on parent (App) state changes — props are stable.
+function EmbeddedApp({ src, title }) {
   return (
     <Box
       component="iframe"
@@ -15,3 +17,5 @@ export default function EmbeddedApp({ src, title }) {
     />
   )
 }
+
+export default memo(EmbeddedApp)

@@ -7,6 +7,10 @@
     <title>openMarine Helm</title>
     <style>
       html, body, #root { height: 100%; margin: 0; background: #0b1622; }
+      /* Kiosk: block browser pinch-zoom / double-tap-zoom of the helm UI (pan still
+         works for scrolling). The Plotter's map zoom is JS-handled inside its own
+         iframe, so it's unaffected. */
+      html, body, #root { touch-action: pan-x pan-y; overscroll-behavior: none; }
       * { box-sizing: border-box; }
       /* Touchscreen: hide the mouse cursor everywhere in the app. */
       *, *::before, *::after { cursor: none !important; }

@@ -4,6 +4,9 @@ After=network.target
 
 [Service]
 ExecStart=/usr/bin/node /home/pi/apps/stereo-service/server.js
+# Album art: ART_ONLINE=0 disables the iTunes lookup (offline behaviour test).
+# ART_CACHE=0 also bypasses the on-disk cover cache.
+Environment=ART_ONLINE=0
 Restart=on-failure
 RestartSec=2
 User=pi

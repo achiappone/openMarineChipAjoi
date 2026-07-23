@@ -1,0 +1,44 @@
+--- avrcp.c.orig	2026-07-23 20:30:19.038848784 +0100
++++ avrcp.c	2026-07-23 21:04:17.201705822 +0100
+@@ -3051,11 +3051,14 @@
+ static void set_browsed_player(struct avrcp *session,
+ 					struct avrcp_player *player)
+ {
+-	if (!player || !player->id || player->browsed)
++	/* NOTE: id==0 is allowed. Some phones (e.g. Pixel) expose their real,
++	 * browsable player as id 0; the browsable flag below is the true gate. */
++	if (!player || player->browsed)
+ 		return;
+ 
+-	if (media_player_get_browsable(player->user_data))
++	if (media_player_get_browsable(player->user_data)) {
+ 		avrcp_set_browsed_player(session, player);
++	}
+ }
+ 
+ static void set_ct_player(struct avrcp *session, struct avrcp_player *player)
+@@ -3777,6 +3780,11 @@
+ 	if (!session->controller->player)
+ 		create_ct_player(session, 0);
+ 
++	/* The list updates the player's browsable feature; now browse it (works even
++	 * when the player id is 0, which set_browsed_player() now permits). */
++	if (session->controller->player)
++		set_browsed_player(session, session->controller->player);
++
+ 	return FALSE;
+ }
+ 
+@@ -4168,6 +4176,12 @@
+ 							handle_browsing_pdu,
+ 							session,
+ 							destroy_browsing);
++
++	/* Proactively query the phone's media player list rather than waiting for an
++	 * AvailablePlayersChanged notification (some phones, e.g. Pixel, never send
++	 * it). This populates the player's browsable feature so it can be browsed. */
++	if (session->controller != NULL)
++		avrcp_get_media_player_list(session);
+ }
+ 
+ static struct avrcp_data *data_init(struct avrcp *session, const char *uuid)
