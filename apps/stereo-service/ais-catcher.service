@@ -1,0 +1,21 @@
+[Unit]
+Description=AIS-catcher (RTL-SDR AIS receiver -> SignalK)
+After=network.target signalk.service
+# NOTE: shares the single RTL-SDR dongle with FM radio. This service is
+# intentionally NOT auto-enabled on boot so FM works by default. Start it
+# on demand (systemctl start ais-catcher) when you want AIS, and stop it
+# before using FM. A second RTL-SDR dongle removes the conflict entirely.
+
+[Service]
+Type=simple
+User=pi
+# -u 127.0.0.1 10110 : NMEA0183 (AIVDM) over UDP to SignalK's AIS input
+# -N 8100            : local web UI / status at http://<pi>:8100
+# -gr TUNER AUTO -a 1536K : sane defaults for VHF AIS with the R820T
+# -M DT              : add timestamp + decoder metadata to output
+ExecStart=/usr/local/bin/AIS-catcher -u 127.0.0.1 10110 -N 8100 -M DT -v 60
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

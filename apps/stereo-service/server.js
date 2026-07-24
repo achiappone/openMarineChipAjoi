@@ -5,9 +5,11 @@ const http = require('http')
 const https = require('https')
 const fs = require('fs')
 const crypto = require('crypto')
-const { spawn, execSync, exec } = require('child_process')
+const { spawn, execSync, exec, execFile } = require('child_process')
 // Async shell helper — never blocks the event loop (which serves the spectrum SSE).
 const execP = (cmd) => new Promise((resolve) => exec(cmd, { encoding: 'utf8', maxBuffer: 1 << 20 }, (e, stdout) => resolve(stdout || '')))
+// execFile with an args array — no shell, so user-supplied SSID/password/IP can't inject.
+const execFileP = (file, args) => new Promise((resolve) => execFile(file, args, { encoding: 'utf8', maxBuffer: 1 << 20 }, (e, stdout, stderr) => resolve({ ok: !e, out: stdout || '', err: (stderr || '') + (e ? ' ' + e.message : '') })))
 
 const PORT = 8082
 const AUDIO_DEV = process.env.AUDIO_DEV || 'plughw:CARD=Headphones' // 3.5mm aux
@@ -1000,6 +1002,111 @@ async function systemInfo() {
   }
 }
 
+// ---- Network: view/adjust IPv4 (DHCP vs static) and Wi-Fi via NetworkManager. ----
+// eth0 = LAN, wlan0 = Wi-Fi. can0 is the NMEA2000 bus and is intentionally ignored.
+const NET_IFACES = [
+  { device: 'eth0', label: 'LAN', type: 'ethernet', nmType: '802-3-ethernet' },
+  { device: 'wlan0', label: 'Wi-Fi', type: 'wifi', nmType: '802-11-wireless' },
+]
+const IP_RE = /^\d{1,3}(\.\d{1,3}){3}$/
+
+// nmcli -t escapes ':' inside values as '\:'; join fields back on the FIRST ':' only.
+function nmSplit1(line) { const i = line.indexOf(':'); return i < 0 ? [line, ''] : [line.slice(0, i), line.slice(i + 1).replace(/\\:/g, ':')] }
+
+async function resolveConn(dev, nmType) {
+  const active = (await execP(`nmcli -t -g GENERAL.CONNECTION device show ${dev} 2>/dev/null`)).trim()
+  if (active && active !== '--') return active
+  const out = await execP('nmcli -t -f NAME,TYPE,DEVICE connection show 2>/dev/null')
+  const rows = out.split('\n').filter(Boolean).map((l) => l.split(':'))
+  const byDev = rows.find((r) => r[2] === dev)
+  if (byDev) return byDev[0]
+  const byType = rows.find((r) => r[1] === nmType)
+  return byType ? byType[0] : ''
+}
+
+async function ifaceDetail({ device, label, type, nmType }) {
+  const show = await execP(`nmcli -t -f GENERAL.STATE,GENERAL.CONNECTION,GENERAL.HWADDR,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS device show ${device} 2>/dev/null`)
+  const lines = show.split('\n').filter(Boolean).map(nmSplit1)
+  const g = (k) => { const m = lines.find(([kk]) => kk === k); return m ? m[1] : '' }
+  const multi = (k) => lines.filter(([kk]) => kk.startsWith(k + '[')).map(([, v]) => v)
+  const conn = g('GENERAL.CONNECTION')
+  let method = 'auto'
+  if (conn && conn !== '--') { const m = (await execP(`nmcli -t -g ipv4.method connection show "${conn}" 2>/dev/null`)).trim(); if (m) method = m }
+  const stateRaw = g('GENERAL.STATE') // e.g. "100 (connected)"
+  return {
+    device, label, type,
+    connection: conn && conn !== '--' ? conn : '',
+    state: (stateRaw.match(/\(([^)]+)\)/) || [, stateRaw || 'unknown'])[1],
+    mac: g('GENERAL.HWADDR'),
+    method,
+    addresses: multi('IP4.ADDRESS'),
+    gateway: g('IP4.GATEWAY'),
+    dns: multi('IP4.DNS'),
+    ssid: type === 'wifi' && conn && conn !== '--' ? conn : '',
+  }
+}
+
+async function networkInfo() {
+  const interfaces = await Promise.all(NET_IFACES.map(ifaceDetail))
+  return { interfaces }
+}
+
+async function setIpv4(b) {
+  const dev = String(b.device || '')
+  const spec = NET_IFACES.find((i) => i.device === dev)
+  if (!spec) return { ok: false, reason: 'bad-device' }
+  const method = b.method === 'manual' ? 'manual' : 'auto'
+  let conn = await resolveConn(dev, spec.nmType)
+  if (!conn) {
+    if (spec.type === 'ethernet') { await execFileP('sudo', ['nmcli', 'connection', 'add', 'type', 'ethernet', 'ifname', 'eth0', 'con-name', 'LAN']); conn = 'LAN' }
+    else return { ok: false, reason: 'no-connection' }
+  }
+  const args = ['nmcli', 'connection', 'modify', conn]
+  if (method === 'manual') {
+    const ip = String(b.address || ''); const prefix = String(b.prefix || '24'); const gw = String(b.gateway || ''); const dns = String(b.dns || '').trim()
+    if (!IP_RE.test(ip)) return { ok: false, reason: 'bad-ip' }
+    if (!/^\d{1,2}$/.test(prefix) || Number(prefix) > 32) return { ok: false, reason: 'bad-prefix' }
+    if (gw && !IP_RE.test(gw)) return { ok: false, reason: 'bad-gateway' }
+    const dnsList = dns.split(/[\s,]+/).filter(Boolean)
+    if (dnsList.some((d) => !IP_RE.test(d))) return { ok: false, reason: 'bad-dns' }
+    args.push('ipv4.method', 'manual', 'ipv4.addresses', `${ip}/${prefix}`, 'ipv4.gateway', gw, 'ipv4.dns', dnsList.join(' '))
+  } else {
+    args.push('ipv4.method', 'auto', 'ipv4.addresses', '', 'ipv4.gateway', '', 'ipv4.dns', '')
+  }
+  const mod = await execFileP('sudo', args)
+  if (!mod.ok) return { ok: false, reason: 'modify-failed', err: mod.err.slice(0, 300) }
+  const up = await execFileP('sudo', ['nmcli', 'connection', 'up', conn])
+  return { ok: up.ok, reason: up.ok ? '' : 'apply-failed', err: up.ok ? '' : up.err.slice(0, 300) }
+}
+
+async function wifiScan() {
+  await execP('nmcli device wifi rescan 2>/dev/null').catch(() => {})
+  const out = await execP('nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list 2>/dev/null')
+  const seen = new Map()
+  for (const line of out.split('\n').filter(Boolean)) {
+    // fields: IN-USE:SSID:SIGNAL:SECURITY  (SSID may contain escaped ':')
+    const parts = line.split(':')
+    const inUse = parts[0] === '*'
+    const security = parts[parts.length - 1]
+    const signal = Number(parts[parts.length - 2])
+    const ssid = parts.slice(1, parts.length - 2).join(':').replace(/\\:/g, ':')
+    if (!ssid) continue
+    const prev = seen.get(ssid)
+    if (!prev || signal > prev.signal) seen.set(ssid, { ssid, signal, security, inUse: inUse || (prev && prev.inUse) })
+  }
+  return { networks: [...seen.values()].sort((a, b) => b.signal - a.signal) }
+}
+
+async function wifiConnect(b) {
+  const ssid = String(b.ssid || '')
+  const pw = String(b.password || '')
+  if (!ssid) return { ok: false, reason: 'no-ssid' }
+  const args = ['nmcli', 'device', 'wifi', 'connect', ssid]
+  if (pw) args.push('password', pw)
+  const r = await execFileP('sudo', args)
+  return { ok: r.ok, reason: r.ok ? '' : 'connect-failed', err: r.ok ? '' : r.err.slice(0, 300) }
+}
+
 // ---- HTTP + SSE ----
 const sseClients = new Set()
 const server = http.createServer((req, res) => {
@@ -1047,7 +1154,7 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'GET' && path === '/api/imu') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify(attitude || {}))
+    res.end(JSON.stringify({ ...(attitude || {}), tempC: ambientC, htuC, humidity }))
     return
   }
   if (req.method === 'GET' && path === '/api/system') {
@@ -1073,6 +1180,51 @@ const server = http.createServer((req, res) => {
       // Only a real BlueZ MediaItem1 path is ever shelled out.
       if (/^\/org\/bluez\/[A-Za-z0-9_/]+$/.test(p)) execP(`busctl --system call org.bluez ${p} org.bluez.MediaItem1 Play 2>/dev/null`)
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true }))
+    })
+    return
+  }
+  if (req.method === 'GET' && path === '/api/gps') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ...gpsState, raw: gpsRaw.slice(-24) }))
+    return
+  }
+  if (req.method === 'GET' && path === '/api/i2c') {
+    execFileP('python3', [`${__dirname}/i2cscan.py`]).then((r) => {
+      let scan = { devices: [] }; try { scan = JSON.parse(r.out) } catch (e) {}
+      // Merge the raw scan with whether the service is actually getting data from each.
+      const runningVal = {
+        MCP9808: ambientC != null ? `${ambientC.toFixed(1)} C` : null,
+        HTU31D: htuC != null ? `${htuC.toFixed(1)} C${humidity != null ? ` / ${Math.round(humidity)}% RH` : ''}` : null,
+        ADXL345: attitude ? `${attitude.roll.toFixed(0)} deg heel` : null,
+      }
+      const tempByName = { MCP9808: ambientC, HTU31D: htuC }
+      const devices = (scan.devices || []).map((d) => ({
+        ...d, running: !!runningVal[d.name], value: runningVal[d.name] || null,
+        tempC: typeof tempByName[d.name] === 'number' ? tempByName[d.name] : null,
+        humidity: d.name === 'HTU31D' && typeof humidity === 'number' ? humidity : null,
+      }))
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ devices, error: scan.error || null }))
+    }).catch(() => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"devices":[]}') })
+    return
+  }
+  if (req.method === 'GET' && path === '/api/network') {
+    networkInfo().then((r) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(r)) })
+      .catch(() => { res.writeHead(500); res.end('{}') })
+    return
+  }
+  if (req.method === 'GET' && path === '/api/network/wifi') {
+    wifiScan().then((r) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(r)) })
+      .catch(() => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"networks":[]}') })
+    return
+  }
+  if (req.method === 'POST' && (path === '/api/network/ipv4' || path === '/api/network/wifi/connect')) {
+    let body = ''
+    req.on('data', (d) => (body += d))
+    req.on('end', () => {
+      let b = {}; try { b = body ? JSON.parse(body) : {} } catch (e) {}
+      const fn = path === '/api/network/ipv4' ? setIpv4 : wifiConnect
+      fn(b).then((r) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(r)) })
+        .catch((e) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, reason: 'error', err: String(e).slice(0, 200) })) })
     })
     return
   }
@@ -1106,7 +1258,10 @@ killPipeline()
 // ---- IMU: ADXL345 tilt (heel/trim) via the imu.py helper (same pipe pattern as
 // bipart.py). attitude stays null when no sensor is present. ----
 let imuProc = null
-let attitude = null // { roll, pitch } degrees
+let attitude = null // { roll, pitch } degrees, or null when no ADXL345
+let ambientC = null // MCP9808 ambient temp (°C), or null when absent
+let htuC = null     // HTU31D ambient temp (°C), or null when absent
+let humidity = null // HTU31D relative humidity (%), or null when absent
 function startImu() {
   const imuPath = `${__dirname}/imu.py`
   try { if (!fs.existsSync(imuPath)) return } catch (e) { return }
@@ -1119,16 +1274,70 @@ function startImu() {
       const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
       if (!line) continue
       if (line === 'READY') continue
-      if (line.startsWith('DEAD')) { attitude = null; continue }
+      if (line.startsWith('DEAD')) { attitude = null; ambientC = null; htuC = null; humidity = null; continue }
+      // "roll pitch temp htuT hum" — any field may be "nan" if that sensor is absent.
       const m = line.split(' ')
-      const roll = Number(m[0]), pitch = Number(m[1])
-      if (m.length === 2 && isFinite(roll) && isFinite(pitch)) attitude = { roll, pitch }
+      const roll = Number(m[0]), pitch = Number(m[1]), temp = Number(m[2]), ht = Number(m[3]), hu = Number(m[4])
+      attitude = (isFinite(roll) && isFinite(pitch)) ? { roll, pitch } : null
+      ambientC = isFinite(temp) ? temp : null
+      htuC = isFinite(ht) ? ht : null
+      humidity = isFinite(hu) ? hu : null
     }
   })
-  imuProc.on('error', () => { imuProc = null; attitude = null })
-  imuProc.on('exit', () => { imuProc = null; attitude = null; setTimeout(startImu, 5000) })
+  imuProc.on('error', () => { imuProc = null; attitude = null; ambientC = null; htuC = null; humidity = null })
+  imuProc.on('exit', () => { imuProc = null; attitude = null; ambientC = null; htuC = null; humidity = null; setTimeout(startImu, 5000) })
 }
 startImu()
+
+// ---- GPS: raw NMEA via gps.py (also UDP-forwarded to SignalK). Buffers recent
+// sentences and parses the acquisition state for the helm's GPS diagnostic view. ----
+let gpsProc = null
+const gpsRaw = []
+const gpsState = { alive: false, fix: 0, rmcValid: false, satsUsed: 0, satsInView: 0, hdop: null, antenna: null, sats: [], updated: 0 }
+let gsvAccum = {}
+function parseGps(line) {
+  gpsRaw.push(line); while (gpsRaw.length > 40) gpsRaw.shift()
+  const f = line.split('*')[0].split(',')
+  const t = f[0] || ''
+  if (/GGA$/.test(t)) {
+    gpsState.fix = Number(f[6]) || 0
+    gpsState.satsUsed = Number(f[7]) || 0
+    gpsState.hdop = f[8] ? Number(f[8]) : null
+    gpsState.updated = Date.now()
+  } else if (/RMC$/.test(t)) {
+    gpsState.rmcValid = f[2] === 'A'
+  } else if (/GSV$/.test(t)) {
+    const talker = t.slice(1, 3) // GP/BD/GL/GA
+    if ((Number(f[2]) || 1) === 1) gsvAccum[talker] = []
+    for (let i = 4; i + 3 < f.length; i += 4) {
+      if (f[i]) (gsvAccum[talker] = gsvAccum[talker] || []).push({ id: Number(f[i]), el: Number(f[i + 1]) || null, az: Number(f[i + 2]) || null, snr: f[i + 3] ? Number(f[i + 3]) : null })
+    }
+    const all = [].concat(...Object.values(gsvAccum))
+    gpsState.sats = all
+    gpsState.satsInView = all.length
+  } else if (/TXT$/.test(t) && /ANTENNA/i.test(line)) {
+    gpsState.antenna = f[4] || null
+  }
+}
+function startGps() {
+  const p = `${__dirname}/gps.py`
+  try { if (!fs.existsSync(p)) return } catch (e) { return }
+  gpsProc = spawn('python3', [p], { stdio: ['ignore', 'pipe', 'ignore'] })
+  let buf = ''
+  gpsProc.stdout.on('data', (d) => {
+    buf += d.toString(); let nl
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
+      if (!line) continue
+      if (line === 'READY') { gpsState.alive = true; continue }
+      if (line.startsWith('DEAD')) { gpsState.alive = false; continue }
+      if (line.startsWith('$')) { gpsState.alive = true; try { parseGps(line) } catch (e) {} }
+    }
+  })
+  gpsProc.on('error', () => { gpsProc = null })
+  gpsProc.on('exit', () => { gpsProc = null; gpsState.alive = false; setTimeout(startGps, 5000) })
+}
+startGps()
 
 setTimeout(() => { state.power = true; applyVolume(); if (state.source === 'FM') scheduleStart(); applyAudioTaps() }, 800)
 server.listen(PORT, () => console.log('stereo-service listening on', PORT))

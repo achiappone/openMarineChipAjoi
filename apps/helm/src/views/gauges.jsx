@@ -8,6 +8,7 @@ const BLUE = '#eef4f8' // "primary" is near-white on this instrument
 const GREEN = '#39d98a'
 const AMBER = '#ffb52e'
 const RED = '#ff3b30'
+const TEAL = '#39c6d8' // Suzuki dial's cyan square block markers
 const TRACK = 'rgba(255,255,255,0.16)'
 const TXT = '#ffffff'
 const DIM = 'rgba(255,255,255,0.55)'
@@ -81,12 +82,35 @@ export function ArcGauge({ label, value, unit, min = 0, max = 10, decimals = 1, 
 // Suzuki SMIS-style analog tachometer: dense white tick marks on black, numbered
 // majors (×1000), white needle, red redline zone, "×1000 r/min" centre text, and a
 // digital r/min readout in the lower opening. Tall, fills a full-height centre cell.
-export function TachGauge({ value, min = 0, max = 7000, redline = 0.857, label = 'r/min' }) {
+// Suzuki warning-lamp glyphs (24x24, filled white). check=engine block, oil=oil can,
+// water=water-in-fuel drop; temp (thermometer + coolant waves) is drawn separately.
+const TACH_ICON = {
+  check: 'M7,4V6H10V8H8A2,2 0 0,0 6,10V13H4V10H2V18H4V15H6V18A2,2 0 0,0 8,20H14V18H16L18.29,20.29L19.71,18.87L17.41,16.59L19,15H21V13H22V10H20V8H21V6H23V4H16V6H13V4H7Z',
+  oil: 'M11,7H15V9H11V7M20,10.14V11H18V13H15V11H13.28C13.03,11.86 12.22,12.5 11.25,12.5C10.08,12.5 9.13,11.55 9.13,10.38C9.13,9.79 9.37,9.26 9.75,8.88L8,7.13V6H6V4H10L12,6H15V4H17V6H19.5C19.78,6 20,6.22 20,6.5V10.14M18,15H20V17.5C20,18.33 19.33,19 18.5,19H4.5C3.67,19 3,18.33 3,17.5V13.5C3,12.67 3.67,12 4.5,12H6V14H4.5V17.5H18.5V15H18M11.25,9.5A0.88,0.88 0 0,0 10.38,10.38A0.88,0.88 0 0,0 11.25,11.25A0.88,0.88 0 0,0 12.13,10.38A0.88,0.88 0 0,0 11.25,9.5Z',
+  water: 'M12,20A6,6 0 0,1 6,14C6,10 12,3.25 12,3.25C12,3.25 18,10 18,14A6,6 0 0,1 12,20Z',
+}
+function LampGlyph({ k, color }) {
+  if (k === 'temp') {
+    return (
+      <g>
+        <path d="M12 3 a2.2 2.2 0 0 0 -2.2 2.2 V13 a3.4 3.4 0 1 0 4.4 0 V5.2 A2.2 2.2 0 0 0 12 3 Z" fill={color} />
+        <path d="M3.5 20.5 q1.6 -1.7 3.2 0 t3.2 0 t3.2 0 t3.2 0" fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
+      </g>
+    )
+  }
+  return <path d={TACH_ICON[k]} fill={color} />
+}
+
+// Suzuki-style analog tach: cyan square block markers at each 1000-rpm major, thin
+// minor ticks, a red needle, "×1000 r/min" under the hub, a digital readout, and a row
+// of engine warning lamps (check / temp / oil / water-in-fuel) with the engine temp
+// shown under the temp lamp. `indicators`: { check, temp, oil, water } each false | 'warn' | 'alarm'.
+export function TachGauge({ value, min = 0, max = 7000, redline = 0.857, label = 'r/min', indicators, engTempF, onTempClick }) {
   const START = 135, SWEEP = 270
   const has = value != null && isFinite(value)
   const frac = has ? clamp01((value - min) / (max - min)) : 0
   const hot = frac >= redline
-  const cx = 110, cy = 112, r = 96
+  const cx = 110, cy = 98, r = 86
   const majors = Math.round(max / 1000)   // one numbered tick per 1000 rpm
   const steps = majors * 5                // 5 minor ticks between majors
 
@@ -96,28 +120,50 @@ export function TachGauge({ value, min = 0, max = 7000, redline = 0.857, label =
     const a = START + SWEEP * f
     const major = i % 5 === 0
     const past = f > redline + 0.002
-    const [x1, y1] = polar(cx, cy, r, a)
-    const [x2, y2] = polar(cx, cy, r - (major ? 20 : 11), a)
-    tk.push(<line key={`t${i}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={past ? RED : major ? TXT : DIM} strokeWidth={major ? 3.5 : 1.8} strokeLinecap="round" />)
     if (major) {
-      const [lx, ly] = polar(cx, cy, r - 36, a)
+      const [bx, by] = polar(cx, cy, r - 5, a)
+      tk.push(<rect key={`b${i}`} x={bx - 5} y={by - 5} width={10} height={10} rx={1.5}
+        transform={`rotate(${a + 90} ${bx} ${by})`} fill={past ? RED : TEAL} />)
+      const [lx, ly] = polar(cx, cy, r - 30, a)
       tk.push(<text key={`n${i}`} x={lx} y={ly + 6} textAnchor="middle" fontSize="19" fontWeight="700" fill={past ? RED : TXT} fontFamily="inherit">{Math.round((max * f) / 1000)}</text>)
+    } else {
+      const [x1, y1] = polar(cx, cy, r, a)
+      const [x2, y2] = polar(cx, cy, r - 9, a)
+      tk.push(<line key={`t${i}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={past ? RED : DIM} strokeWidth={2} strokeLinecap="round" />)
     }
   }
   const nAng = START + SWEEP * frac
-  const [nx, ny] = polar(cx, cy, r - 8, nAng)
-  const [tx, ty] = polar(cx, cy, 22, nAng + 180)
+  const [nx, ny] = polar(cx, cy, r - 12, nAng)
+  const [tx, ty] = polar(cx, cy, 20, nAng + 180)
+
+  const LAMPS = ['check', 'temp', 'oil', 'water']
+  const litColor = (v) => (v === 'alarm' ? RED : v === 'warn' ? AMBER : null)
+  const xs = [59, 93, 127, 161]
+  const lampCy = 222
+
   return (
-    <svg viewBox="0 0 220 250" preserveAspectRatio="xMidYMid meet" style={{ width: '100%', height: '100%', display: 'block' }}>
-      {/* redline arc on the outer rim */}
-      <path d={arc(cx, cy, r + 5, START + SWEEP * redline, START + SWEEP)} stroke={RED} strokeWidth={5} fill="none" strokeLinecap="round" />
+    <svg viewBox="0 0 220 258" preserveAspectRatio="xMidYMid meet" style={{ width: '100%', height: '100%', display: 'block' }}>
       {tk}
-      <text x={cx} y={cy - 26} textAnchor="middle" fontSize="16" fontWeight="700" letterSpacing="1" fill={DIM} fontFamily="inherit">×1000</text>
-      <text x={cx} y={cy - 8} textAnchor="middle" fontSize="13" fill={DIM} fontFamily="inherit">{label}</text>
-      {has && <><line x1={tx} y1={ty} x2={nx} y2={ny} stroke={TXT} strokeWidth={5} strokeLinecap="round" /><circle cx={cx} cy={cy} r={9} fill={TXT} /></>}
-      {/* digital r/min in the clear lower opening, below the 0/7 tick labels */}
-      <text x={cx} y={cy + 108} textAnchor="middle" fontSize="44" fontWeight="800" fill={hot ? RED : TXT} fontFamily="inherit">{has ? Math.round(value) : '—'}</text>
-      <text x={cx} y={cy + 128} textAnchor="middle" fontSize="14" fontWeight="700" letterSpacing="3" fill={DIM} fontFamily="inherit">RPM</text>
+      {/* red needle + hub */}
+      {has && <line x1={tx} y1={ty} x2={nx} y2={ny} stroke={RED} strokeWidth={5} strokeLinecap="round" />}
+      <circle cx={cx} cy={cy} r={9} fill="#111" stroke={has ? TXT : DIM} strokeWidth={2} />
+      {/* digital readout below the dial (clear of the 0/7 scale labels) + scale label */}
+      <text x={cx} y={cy + 74} textAnchor="middle" fontSize="30" fontWeight="800" fill={hot ? RED : TXT} fontFamily="inherit">{has ? Math.round(value) : '—'}</text>
+      <text x={cx} y={cy + 92} textAnchor="middle" fontSize="12" fontWeight="700" letterSpacing="0.5" fill={DIM} fontFamily="inherit">×1000 {label}</text>
+      {/* engine warning lamps (Suzuki icons), lit red/amber when active */}
+      {LAMPS.map((k, i) => {
+        const c = litColor(indicators ? indicators[k] : false)
+        const on = !!c
+        return (
+          <g key={k}>
+            <rect x={xs[i] - 14} y={lampCy - 14} width={28} height={28} rx={6} fill={on ? c : 'rgba(255,255,255,0.06)'} stroke={on ? 'none' : TRACK} strokeWidth={1} />
+            <g transform={`translate(${xs[i] - 9} ${lampCy - 9}) scale(0.75)`}><LampGlyph k={k} color={on ? '#fff' : DIM} /></g>
+          </g>
+        )
+      })}
+      {/* engine temperature under the TEMP lamp — tap to enlarge the engine-temp gauge */}
+      {engTempF != null && <text x={xs[1]} y={lampCy + 27} textAnchor="middle" fontSize="12" fontWeight="700" fill={onTempClick ? TEAL : DIM} fontFamily="inherit">{Math.round(engTempF)}°F</text>}
+      {onTempClick && <rect x={xs[1] - 22} y={lampCy - 18} width={44} height={56} fill="transparent" pointerEvents="all" style={{ cursor: 'pointer' }} onClick={onTempClick} />}
     </svg>
   )
 }

@@ -28,6 +28,9 @@ import RemoveIcon from '@mui/icons-material/Remove'
 import BluetoothIcon from '@mui/icons-material/Bluetooth'
 import BluetoothSearchingIcon from '@mui/icons-material/BluetoothSearching'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
+import WifiIcon from '@mui/icons-material/Wifi'
+import SettingsEthernetIcon from '@mui/icons-material/SettingsEthernet'
+import LockIcon from '@mui/icons-material/Lock'
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline'
 import BatteryFullIcon from '@mui/icons-material/BatteryFull'
 import Battery60Icon from '@mui/icons-material/Battery60'
@@ -390,6 +393,266 @@ function SystemPanel({ active }) {
   )
 }
 
+// ---- Sensors: live I2C scan + GPS status, °C/°F, humidity, and a temp history graph ----
+const cToF = (c) => (c * 9) / 5 + 32
+function TempHistoryGraph({ hist }) {
+  const W = 600, H = 120, pad = 6
+  const series = [{ key: 'htu', label: 'HTU', color: '#39c6d8' }, { key: 'mcp', label: 'MCP', color: '#39d98a' }, { key: 'cpu', label: 'CPU', color: '#ffb52e' }]
+  const all = hist.flatMap((p) => series.map((s) => p[s.key]).filter((v) => v != null))
+  if (all.length < 2) return <Typography sx={{ opacity: 0.5, fontSize: '0.8rem' }}>Collecting history…</Typography>
+  const lo = Math.min(...all) - 2, hi = Math.max(...all) + 2, rng = (hi - lo) || 1
+  const x = (i) => pad + (i / Math.max(1, hist.length - 1)) * (W - 2 * pad)
+  const y = (v) => H - pad - ((v - lo) / rng) * (H - 2 * pad)
+  return (
+    <Box>
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: '100%', height: 120, display: 'block' }}>
+        {series.map((s) => {
+          const pts = hist.map((p, i) => (p[s.key] != null ? `${x(i).toFixed(1)},${y(p[s.key]).toFixed(1)}` : null)).filter(Boolean).join(' ')
+          return pts ? <polyline key={s.key} points={pts} fill="none" stroke={s.color} strokeWidth={2} vectorEffect="non-scaling-stroke" strokeLinejoin="round" /> : null
+        })}
+      </svg>
+      <Stack direction="row" spacing={2} sx={{ mt: 0.75 }}>
+        {series.map((s) => (
+          <Stack key={s.key} direction="row" spacing={0.5} alignItems="center">
+            <Box sx={{ width: 14, height: 3, bgcolor: s.color, borderRadius: 1 }} /><Typography sx={{ fontSize: '0.75rem', opacity: 0.7 }}>{s.label}</Typography>
+          </Stack>
+        ))}
+        <Box sx={{ flex: 1 }} />
+        <Typography sx={{ fontSize: '0.72rem', opacity: 0.5 }}>{lo.toFixed(0)}–{hi.toFixed(0)}°C · last {hist.length}</Typography>
+      </Stack>
+    </Box>
+  )
+}
+function SensorsPanel({ active }) {
+  const [data, setData] = useState(null)
+  const [gps, setGps] = useState(null)
+  const [gpsd, setGpsd] = useState(null)
+  const [err, setErr] = useState(false)
+  const histRef = useRef([])
+  const [, force] = useState(0)
+  const load = async () => {
+    try {
+      const [i2c, sys, nav, raw] = await Promise.all([
+        fetch(`${SVC}/api/i2c`).then((r) => r.json()),
+        fetch(`${SVC}/api/system`).then((r) => r.json()).catch(() => null),
+        fetch('/signalk/v1/api/vessels/self/navigation').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        fetch(`${SVC}/api/gps`).then((r) => r.json()).catch(() => null),
+      ])
+      setData(i2c); setGps(nav); setGpsd(raw); setErr(false)
+      const byName = Object.fromEntries((i2c.devices || []).map((d) => [d.name, d]))
+      histRef.current = [...histRef.current, { htu: byName.HTU31D?.tempC ?? null, mcp: byName.MCP9808?.tempC ?? null, cpu: sys?.temp ?? null }].slice(-90)
+      force((n) => n + 1)
+    } catch (e) { setErr(true) }
+  }
+  useEffect(() => {
+    if (!active) return
+    load(); const t = setInterval(load, 3000)
+    return () => clearInterval(t)
+  }, [active])
+  if (err && !data) return <Typography sx={{ opacity: 0.6 }}>Can't reach the stereo service.</Typography>
+  if (!data) return <Typography sx={{ opacity: 0.6 }}>Scanning I²C bus…</Typography>
+  const devices = data.devices || []
+  const pos = gps?.position?.value
+  const fix = !!(pos && typeof pos.latitude === 'number')
+  const satsIV = gps?.gnss?.satellitesInView?.value?.count ?? gps?.gnss?.satellitesInView?.count ?? null
+  const satsUsed = gps?.gnss?.satellites?.value ?? null
+  const tempStr = (d) => (d.tempC != null ? `${d.tempC.toFixed(1)}°C · ${cToF(d.tempC).toFixed(0)}°F${d.humidity != null ? `  ·  ${Math.round(d.humidity)}% RH` : ''}` : d.value)
+  return (
+    <Stack spacing={1.5}>
+      <Typography sx={{ opacity: 0.6, fontSize: '0.85rem' }}>Live sensors — I²C bus + GPS.</Typography>
+      <Paper variant="outlined" sx={{ p: 1.75, display: 'flex', alignItems: 'center', gap: 2 }}>
+        <Chip label="UART" size="small" sx={{ fontFamily: 'monospace', fontWeight: 700 }} />
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography sx={{ fontWeight: 700 }}>ATGM336H GPS</Typography>
+          <Typography sx={{ fontSize: '0.85rem', opacity: 0.7 }}>position · /dev/serial0 @ 9600{satsIV != null ? `  ·  ${satsIV} sats in view${satsUsed != null ? `, ${satsUsed} used` : ''}` : ''}</Typography>
+        </Box>
+        {fix ? <Typography sx={{ fontVariantNumeric: 'tabular-nums', fontWeight: 700, fontSize: '0.9rem' }}>{Math.abs(pos.latitude).toFixed(4)}°{pos.latitude >= 0 ? 'N' : 'S'} {Math.abs(pos.longitude).toFixed(4)}°{pos.longitude >= 0 ? 'E' : 'W'}</Typography> : null}
+        <Chip size="small" label={fix ? 'fix' : gps ? 'acquiring' : 'no data'} color={fix ? 'success' : gps ? 'warning' : 'default'} variant={fix ? 'filled' : 'outlined'} />
+      </Paper>
+      {gpsd && (
+        <Paper variant="outlined" sx={{ p: 1.75 }}>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+            <Typography sx={{ opacity: 0.6, fontSize: '0.8rem', letterSpacing: 1, fontWeight: 700 }}>GPS ACQUISITION</Typography>
+            <Box sx={{ flex: 1 }} />
+            <Chip size="small" label={gpsd.fix >= 1 ? 'FIX' : gpsd.alive ? 'searching' : 'no data'} color={gpsd.fix >= 1 ? 'success' : gpsd.alive ? 'warning' : 'default'} variant={gpsd.fix >= 1 ? 'filled' : 'outlined'} />
+          </Stack>
+          <Stack direction="row" spacing={3} sx={{ mb: 1.5, flexWrap: 'wrap', rowGap: 1 }}>
+            {[['In view', gpsd.satsInView], ['Used', gpsd.satsUsed], ['HDOP', gpsd.hdop ?? '—'], ['Antenna', gpsd.antenna || '—']].map(([l, v]) => (
+              <Box key={l}><Typography sx={{ fontSize: '0.6rem', opacity: 0.5, letterSpacing: 1, fontWeight: 700 }}>{l}</Typography><Typography sx={{ fontWeight: 800, fontSize: '1.1rem' }}>{v}</Typography></Box>
+            ))}
+          </Stack>
+          {gpsd.sats && gpsd.sats.filter((s) => s.snr).length > 0 ? (
+            <Box sx={{ display: 'flex', alignItems: 'flex-end', gap: 0.5, height: 64, mb: 1 }}>
+              {gpsd.sats.filter((s) => s.snr).sort((a, b) => b.snr - a.snr).map((s, i) => (
+                <Box key={i} sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
+                  <Box sx={{ width: '80%', height: `${Math.min(100, (s.snr / 50) * 100)}%`, minHeight: 2, bgcolor: s.snr >= 30 ? '#39d98a' : s.snr >= 20 ? '#ffb52e' : '#ff3b30', borderRadius: 0.5 }} />
+                  <Typography sx={{ fontSize: '0.55rem', opacity: 0.6, mt: 0.25 }}>{s.id}</Typography>
+                </Box>
+              ))}
+            </Box>
+          ) : (
+            <Typography sx={{ opacity: 0.55, fontSize: '0.85rem', mb: 1 }}>No satellite signal yet — the module is healthy (raw NMEA streaming below), but the antenna isn't receiving. It needs a clear view of the sky, away from the Pi/screen/SDR.</Typography>
+          )}
+          <Box sx={{ bgcolor: 'rgba(0,0,0,0.45)', borderRadius: 1, p: 1, fontFamily: 'monospace', fontSize: '0.72rem', lineHeight: 1.5, maxHeight: 150, overflowY: 'auto', color: 'rgba(150,220,150,0.9)' }}>
+            {(gpsd.raw || []).map((l, i) => <Box key={i} sx={{ whiteSpace: 'nowrap' }}>{l}</Box>)}
+            {(!gpsd.raw || gpsd.raw.length === 0) && <Box sx={{ opacity: 0.5 }}>waiting for NMEA…</Box>}
+          </Box>
+        </Paper>
+      )}
+      {devices.map((d) => (
+        <Paper key={d.addr} variant="outlined" sx={{ p: 1.75, display: 'flex', alignItems: 'center', gap: 2 }}>
+          <Chip label={d.addr} size="small" sx={{ fontFamily: 'monospace', fontWeight: 700 }} />
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography sx={{ fontWeight: 700 }}>{d.name}{d.extra ? <Box component="span" sx={{ opacity: 0.5, fontWeight: 400, ml: 1, fontSize: '0.85rem' }}>{d.extra}</Box> : null}</Typography>
+            <Typography sx={{ fontSize: '0.85rem', opacity: 0.7 }}>{d.role || '—'}</Typography>
+          </Box>
+          {(d.tempC != null || d.value) ? <Typography sx={{ fontVariantNumeric: 'tabular-nums', fontWeight: 700, opacity: 0.9, fontSize: '0.9rem' }}>{tempStr(d)}</Typography> : null}
+          <Chip size="small" label={d.running ? 'running' : d.name === 'unknown' ? 'detected' : 'idle'}
+            color={d.running ? 'success' : d.name === 'unknown' ? 'default' : 'warning'} variant={d.running ? 'filled' : 'outlined'} />
+        </Paper>
+      ))}
+      <Paper variant="outlined" sx={{ p: 1.75 }}>
+        <Typography sx={{ opacity: 0.6, fontSize: '0.8rem', letterSpacing: 1, fontWeight: 700, mb: 1 }}>TEMPERATURE HISTORY</Typography>
+        <TempHistoryGraph hist={histRef.current} />
+      </Paper>
+      <Typography sx={{ opacity: 0.45, fontSize: '0.78rem' }}>"running" = actively read. "idle" = on the bus, not wired to a reader yet.</Typography>
+    </Stack>
+  )
+}
+
+// ---- Network settings: DHCP/static IP per interface + Wi-Fi scan/connect ----
+// Talks to the stereo-service /api/network* endpoints, which drive NetworkManager.
+function IfaceCard({ iface, onApply }) {
+  const cur = iface.addresses && iface.addresses[0] ? iface.addresses[0] : ''
+  const [method, setMethod] = useState(iface.method === 'manual' ? 'manual' : 'auto')
+  const [ip, setIp] = useState(cur ? cur.split('/')[0] : '')
+  const [prefix, setPrefix] = useState(cur && cur.includes('/') ? cur.split('/')[1] : '24')
+  const [gw, setGw] = useState(iface.gateway || '')
+  const [dns, setDns] = useState((iface.dns || []).join(' '))
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const connected = iface.state === 'connected'
+  const submit = async () => {
+    setBusy(true); setMsg(null)
+    const body = method === 'manual'
+      ? { device: iface.device, method: 'manual', address: ip, prefix, gateway: gw, dns }
+      : { device: iface.device, method: 'auto' }
+    const r = await onApply(body)
+    setBusy(false)
+    setMsg(r && r.ok ? { ok: true, t: 'Applied.' } : { ok: false, t: `Failed: ${(r && r.reason) || 'error'}` })
+  }
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+        {iface.type === 'wifi' ? <WifiIcon fontSize="small" /> : <SettingsEthernetIcon fontSize="small" />}
+        <Typography sx={{ fontWeight: 700 }}>{iface.label}</Typography>
+        <Chip size="small" label={iface.state} color={connected ? 'success' : 'default'} />
+        <Box sx={{ flex: 1 }} />
+        {iface.type === 'wifi' && iface.ssid ? <Chip size="small" variant="outlined" label={iface.ssid} /> : null}
+      </Stack>
+      <Typography sx={{ fontSize: '0.85rem', opacity: 0.7, mb: 1.25 }}>
+        {cur || 'no address'}{iface.gateway ? `  ·  gw ${iface.gateway}` : ''}{iface.dns && iface.dns.length ? `  ·  dns ${iface.dns.join(', ')}` : ''}
+      </Typography>
+      <ToggleButtonGroup exclusive size="small" value={method} onChange={(_, v) => v && setMethod(v)} sx={{ mb: method === 'manual' ? 1.25 : 1 }}>
+        <ToggleButton value="auto">DHCP (auto)</ToggleButton>
+        <ToggleButton value="manual">Static</ToggleButton>
+      </ToggleButtonGroup>
+      {method === 'manual' && (
+        <Stack spacing={1.25} sx={{ mb: 1.25 }}>
+          <Stack direction="row" spacing={1}>
+            <TextField size="small" label="IP address" placeholder="192.168.1.50" value={ip} onChange={(e) => setIp(e.target.value)} sx={{ flex: 2 }} />
+            <TextField size="small" label="Prefix" placeholder="24" value={prefix} onChange={(e) => setPrefix(e.target.value)} sx={{ flex: 1 }} />
+          </Stack>
+          <TextField size="small" label="Gateway" placeholder="192.168.1.1" value={gw} onChange={(e) => setGw(e.target.value)} />
+          <TextField size="small" label="DNS (space-separated)" placeholder="192.168.1.1 8.8.8.8" value={dns} onChange={(e) => setDns(e.target.value)} />
+        </Stack>
+      )}
+      {connected && (
+        <Typography sx={{ fontSize: '0.78rem', color: 'warning.main', mb: 1 }}>
+          ⚠ Changing this interface's address may drop the connection you're using right now.
+        </Typography>
+      )}
+      <Stack direction="row" spacing={1.5} alignItems="center">
+        <Button variant="contained" size="small" onClick={submit} disabled={busy}>{busy ? 'Applying…' : 'Apply'}</Button>
+        {msg && <Typography sx={{ fontSize: '0.85rem', color: msg.ok ? 'success.main' : 'error.main' }}>{msg.t}</Typography>}
+      </Stack>
+    </Paper>
+  )
+}
+
+function WifiConnect({ onChanged }) {
+  const [nets, setNets] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [sel, setSel] = useState(null)
+  const [pw, setPw] = useState('')
+  const [msg, setMsg] = useState(null)
+  const scan = async () => {
+    setBusy(true); setNets(null); setMsg(null); setSel(null)
+    const r = await fetch(`${SVC}/api/network/wifi`).then((x) => x.json()).catch(() => ({ networks: [] }))
+    setNets(r.networks || []); setBusy(false)
+  }
+  const connect = async (ssid) => {
+    setMsg({ t: `Connecting to ${ssid}…` })
+    const r = await fetch(`${SVC}/api/network/wifi/connect`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ssid, password: pw }) })
+      .then((x) => x.json()).catch(() => ({ ok: false }))
+    setMsg(r.ok ? { ok: true, t: `Connected to ${ssid}` } : { ok: false, t: `Failed: ${r.reason || 'error'}` })
+    if (r.ok) { setSel(null); setPw(''); onChanged && onChanged() }
+  }
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+        <WifiIcon fontSize="small" />
+        <Typography sx={{ fontWeight: 700, flex: 1 }}>Join a Wi-Fi network</Typography>
+        <Button size="small" variant="outlined" onClick={scan} disabled={busy}>{busy ? 'Scanning…' : 'Scan'}</Button>
+      </Stack>
+      {msg && <Typography sx={{ fontSize: '0.85rem', mb: 1, color: msg.ok ? 'success.main' : msg.ok === false ? 'error.main' : 'text.secondary' }}>{msg.t}</Typography>}
+      {nets && nets.length === 0 && <Typography sx={{ opacity: 0.6, fontSize: '0.85rem' }}>No networks found.</Typography>}
+      <Stack spacing={0.5}>
+        {(nets || []).map((n) => (
+          <Box key={n.ssid}>
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ py: 0.5, cursor: 'pointer' }} onClick={() => setSel(sel === n.ssid ? null : n.ssid)}>
+              <WifiIcon fontSize="small" sx={{ opacity: 0.4 + Math.min(0.6, n.signal / 100 * 0.6) }} />
+              <Typography sx={{ flex: 1, fontWeight: n.inUse ? 700 : 400 }}>{n.ssid}{n.inUse ? '  ✓' : ''}</Typography>
+              {n.security && n.security !== '--' ? <LockIcon sx={{ fontSize: 15, opacity: 0.5 }} /> : null}
+              <Typography sx={{ fontSize: '0.8rem', opacity: 0.55, width: 34, textAlign: 'right' }}>{n.signal}%</Typography>
+            </Stack>
+            {sel === n.ssid && !n.inUse && (
+              <Stack direction="row" spacing={1} alignItems="center" sx={{ py: 0.5, pl: 4 }}>
+                {n.security && n.security !== '--'
+                  ? <TextField size="small" type="password" label="Password" value={pw} onChange={(e) => setPw(e.target.value)} sx={{ flex: 1 }} />
+                  : <Typography sx={{ flex: 1, fontSize: '0.85rem', opacity: 0.6 }}>Open network</Typography>}
+                <Button size="small" variant="contained" onClick={() => connect(n.ssid)}>Connect</Button>
+              </Stack>
+            )}
+          </Box>
+        ))}
+      </Stack>
+    </Paper>
+  )
+}
+
+function NetworkPanel({ active }) {
+  const [net, setNet] = useState(null)
+  const [err, setErr] = useState(false)
+  const load = () => fetch(`${SVC}/api/network`).then((r) => r.json())
+    .then((d) => { setNet(d); setErr(false) }).catch(() => setErr(true))
+  useEffect(() => { if (active) load() }, [active])
+  const apply = async (body) => {
+    const r = await fetch(`${SVC}/api/network/ipv4`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then((x) => x.json()).catch(() => ({ ok: false, reason: 'error' }))
+    setTimeout(load, 1500) // refresh after NetworkManager settles
+    return r
+  }
+  if (err && !net) return <Typography sx={{ opacity: 0.6 }}>Can't reach the stereo service.</Typography>
+  if (!net) return <Typography sx={{ opacity: 0.6 }}>Reading network…</Typography>
+  return (
+    <Stack spacing={1.5}>
+      {(net.interfaces || []).map((iface) => <IfaceCard key={iface.device} iface={iface} onApply={apply} />)}
+      <WifiConnect onChanged={() => setTimeout(load, 1500)} />
+    </Stack>
+  )
+}
+
 // ---- Music-library browser (AVRCP Filesystem via the service's btBrowse) ----
 // Shared by the full and compact views (imported like Visualizer). Folders push
 // onto a nav stack so the back arrow returns to the parent; tapping a track plays
@@ -544,6 +807,51 @@ export function BrowseLibraryDialog({ open, onClose, c, browsable, deviceKey }) 
 }
 
 // Settings modal, tabbed by source: Bluetooth (pairing/devices), FM (tuner), Aux.
+// Touchscreen on-screen keyboard: appears when a text field is focused (there's no
+// physical keyboard on the helm). Types via the native value setter so MUI onChange fires.
+function OnScreenKeyboard() {
+  const [target, setTarget] = useState(null)
+  const [shift, setShift] = useState(false)
+  useEffect(() => {
+    const isText = (el) => el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !['checkbox', 'radio', 'range', 'button', 'submit', 'file'].includes(el.type)
+    const onIn = (e) => { if (isText(e.target)) setTarget(e.target) }
+    const onOut = () => setTimeout(() => { if (!isText(document.activeElement)) setTarget(null) }, 120)
+    document.addEventListener('focusin', onIn)
+    document.addEventListener('focusout', onOut)
+    return () => { document.removeEventListener('focusin', onIn); document.removeEventListener('focusout', onOut) }
+  }, [])
+  if (!target) return null
+  const setVal = (v) => {
+    const proto = target.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set
+    setter.call(target, v); target.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+  const press = (k) => {
+    if (k === 'del') setVal(target.value.slice(0, -1))
+    else if (k === 'space') setVal(target.value + ' ')
+    else setVal(target.value + (shift ? k.toUpperCase() : k))
+  }
+  const key = (label, onClick, flex = 1) => (
+    <Button key={label} onMouseDown={(e) => e.preventDefault()} onClick={onClick} variant="outlined"
+      sx={{ minWidth: 0, flex, py: 1.1, fontSize: '1.15rem', lineHeight: 1, color: 'text.primary', borderColor: 'rgba(255,255,255,0.22)' }}>{label}</Button>
+  )
+  return (
+    <Box onMouseDown={(e) => e.preventDefault()} sx={{ position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 4000,
+      bgcolor: 'rgba(8,12,18,0.98)', borderTop: '1px solid rgba(255,255,255,0.2)', p: 1, boxShadow: '0 -8px 24px rgba(0,0,0,0.55)' }}>
+      {['1234567890', 'qwertyuiop', 'asdfghjkl', 'zxcvbnm.-'].map((row) => (
+        <Stack key={row} direction="row" spacing={0.5} justifyContent="center" sx={{ mb: 0.5 }}>
+          {row.split('').map((c) => key(shift ? c.toUpperCase() : c, () => press(c)))}
+        </Stack>
+      ))}
+      <Stack direction="row" spacing={0.5} justifyContent="center">
+        {key(shift ? '⬆' : '⇧', () => setShift((s) => !s), 1.4)}
+        {key('space', () => press('space'), 5)}
+        {key('⌫', () => press('del'), 1.4)}
+        {key('Done', () => target.blur(), 1.6)}
+      </Stack>
+    </Box>
+  )
+}
 export function SettingsDialog({ open, onClose, settings, onChange, tab = 'fm', onTabChange, bt = {}, c }) {
   const st = settings || {}
   const auto = st.gain < 0
@@ -561,8 +869,8 @@ export function SettingsDialog({ open, onClose, settings, onChange, tab = 'fm', 
   return (
     // Fixed height so the dialog never resizes (and so its top edge never moves)
     // when switching between the Bluetooth/FM/Aux tabs — the body scrolls instead.
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth
-      PaperProps={{ sx: { height: 'min(78vh, 640px)', display: 'flex', flexDirection: 'column' } }}>
+    <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth
+      PaperProps={{ sx: { height: 'min(80vh, 680px)', display: 'flex', flexDirection: 'column', position: 'relative' } }}>
       <Stack direction="row" alignItems="center" sx={{ px: 2, pt: 1.5, flexShrink: 0 }}>
         <Typography variant="h6" sx={{ flex: 1, fontWeight: 800 }}>Settings</Typography>
         <IconButton onClick={onClose}><CloseIcon /></IconButton>
@@ -574,6 +882,8 @@ export function SettingsDialog({ open, onClose, settings, onChange, tab = 'fm', 
         <Tab value="aux" label="Aux" />
         <Tab value="engine" label="Engine" />
         <Tab value="trip" label="Trip" />
+        <Tab value="network" label="Network" />
+        <Tab value="sensors" label="Sensors" />
         <Tab value="system" label="System" />
       </Tabs>
       {/* Scrolls by drag/flick, but no visible scrollbar — it's a touchscreen, and
@@ -677,6 +987,8 @@ export function SettingsDialog({ open, onClose, settings, onChange, tab = 'fm', 
         )}
         {tab === 'engine' && <EnginePanel />}
         {tab === 'trip' && <TripPanel active={tab === 'trip'} />}
+        {tab === 'network' && <NetworkPanel active={tab === 'network'} />}
+        {tab === 'sensors' && <SensorsPanel active={tab === 'sensors'} />}
         {tab === 'system' && <SystemPanel active={tab === 'system'} />}
         {tab === 'aux' && (
           <Stack spacing={2.5}>
@@ -694,6 +1006,7 @@ export function SettingsDialog({ open, onClose, settings, onChange, tab = 'fm', 
           </Stack>
         )}
       </Box>
+      <OnScreenKeyboard />
     </Dialog>
   )
 }
