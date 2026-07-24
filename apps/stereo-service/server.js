@@ -1045,6 +1045,11 @@ const server = http.createServer((req, res) => {
     if (currentArt.buf && (!k || currentArt.key === k)) { res.writeHead(200, { 'Content-Type': currentArt.type, 'Cache-Control': 'public, max-age=86400' }); return res.end(currentArt.buf) }
     res.writeHead(404); return res.end('no art')
   }
+  if (req.method === 'GET' && path === '/api/imu') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(attitude || {}))
+    return
+  }
   if (req.method === 'GET' && path === '/api/system') {
     systemInfo().then((info) => {
       res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -1098,6 +1103,33 @@ setInterval(() => {
 
 killPipeline()
 // Resume persisted state so a deploy/restart doesn't turn the stereo off.
+// ---- IMU: ADXL345 tilt (heel/trim) via the imu.py helper (same pipe pattern as
+// bipart.py). attitude stays null when no sensor is present. ----
+let imuProc = null
+let attitude = null // { roll, pitch } degrees
+function startImu() {
+  const imuPath = `${__dirname}/imu.py`
+  try { if (!fs.existsSync(imuPath)) return } catch (e) { return }
+  imuProc = spawn('python3', [imuPath], { stdio: ['ignore', 'pipe', 'ignore'] })
+  let buf = ''
+  imuProc.stdout.on('data', (d) => {
+    buf += d.toString()
+    let nl
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
+      if (!line) continue
+      if (line === 'READY') continue
+      if (line.startsWith('DEAD')) { attitude = null; continue }
+      const m = line.split(' ')
+      const roll = Number(m[0]), pitch = Number(m[1])
+      if (m.length === 2 && isFinite(roll) && isFinite(pitch)) attitude = { roll, pitch }
+    }
+  })
+  imuProc.on('error', () => { imuProc = null; attitude = null })
+  imuProc.on('exit', () => { imuProc = null; attitude = null; setTimeout(startImu, 5000) })
+}
+startImu()
+
 setTimeout(() => { state.power = true; applyVolume(); if (state.source === 'FM') scheduleStart(); applyAudioTaps() }, 800)
 server.listen(PORT, () => console.log('stereo-service listening on', PORT))
 process.on('SIGTERM', () => { stopRadio(); process.exit(0) })

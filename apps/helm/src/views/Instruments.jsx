@@ -4,9 +4,24 @@ import WbSunnyIcon from '@mui/icons-material/WbSunny'
 import AcUnitIcon from '@mui/icons-material/AcUnit'
 import ThermostatIcon from '@mui/icons-material/Thermostat'
 import useSignalKData, { skCelsius, skValue, skDeg, skMeters, skKnots, M_TO_FT } from '../hooks/useSignalKData'
-import { ArcGauge, TachGauge, CompassGauge, StatusGauge, Sparkline, GAUGE_COLORS, GAUGE_BG } from './gauges'
+import { ArcGauge, TachGauge, CompassGauge, StatusGauge, InclinometerGauge, Sparkline, GAUGE_COLORS, GAUGE_BG } from './gauges'
 
+const SVC = `http://${location.hostname}:8082`
 const M3S_TO_GPH = 951019.39 // m³/s → US gallons/hour
+
+// Poll the ADXL345 attitude from the stereo-service. Always live (not demo), so the
+// physical sensor can be tilt-tested regardless of the demo toggle.
+function useAttitude() {
+  const [att, setAtt] = useState(null)
+  useEffect(() => {
+    let alive = true
+    const poll = () => fetch(`${SVC}/api/imu`).then((r) => r.json())
+      .then((d) => { if (alive) setAtt(d && typeof d.roll === 'number' ? d : null) }).catch(() => {})
+    poll(); const t = setInterval(poll, 200)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+  return att
+}
 const CARD16 = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
 const cardinal = (d) => (d == null ? '' : CARD16[Math.round(d / 22.5) % 16])
 const fmt = (v, d = 1) => (v == null ? '—' : v.toFixed(d))
@@ -77,7 +92,6 @@ function useDemoValues(active) {
         'navigation.position': { value: { latitude: 27.9506 + 0.006 * Math.sin(t / 4), longitude: -82.4572 + 0.006 * Math.cos(t / 4) } },
       }
       if (phase === 1) m['notifications.propulsion.main.oil'] = { value: { state: 'warn', message: 'Low oil pressure' } }
-      if (phase === 2) m['notifications.propulsion.main.temp'] = { value: { state: 'alarm', message: 'Engine overheat' } }
       setVals(m)
       timer = setTimeout(tick, 200)
     }
@@ -87,6 +101,8 @@ function useDemoValues(active) {
   return vals
 }
 
+const SEV = { unknown: -1, ok: 0, warn: 1, alarm: 2 }
+const worse = (a, b) => (SEV[b.level] > SEV[a.level] ? b : a)
 function engineStatus(values) {
   const rank = { normal: 0, nominal: 0, alert: 1, warn: 2, alarm: 3, emergency: 4 }
   let level = null, msg = ''
@@ -193,7 +209,12 @@ export default function Instruments() {
   const engTemp = (() => { const v = numAt(values, findPath(values, /^propulsion\..+\.(coolantTemperature|temperature)$/)); return v == null ? null : v - 273.15 })()
   const fuelRate = (() => { const v = numAt(values, findPath(values, /^propulsion\..+\.fuel\.rate$/)); return v == null ? null : v * M3S_TO_GPH })()
   const fuelLevel = numAt(values, findPath(values, /^tanks\.fuel\..+\.currentLevel$/))
-  const engStatus = engineStatus(values)
+  let engStatus = engineStatus(values)
+  // Overheat is derived from the actual engine temperature, and shows the temp.
+  if (engTemp != null) {
+    if (engTemp >= 100) engStatus = worse(engStatus, { level: 'alarm', detail: `OVERHEAT ${Math.round(engTemp)}°C` })
+    else if (engTemp >= 90) engStatus = worse(engStatus, { level: 'warn', detail: `HOT ${Math.round(engTemp)}°C` })
+  }
   const battV = numAt(values, findPath(values, /^electrical\.batteries\..+\.voltage$/))
   const battA = numAt(values, findPath(values, /^electrical\.batteries\..+\.current$/))
   const airT = skCelsius(values, 'environment.outside.temperature')
@@ -215,6 +236,7 @@ export default function Instruments() {
   })()
   const pos = skValue(values, 'navigation.position')
 
+  const attitude = useAttitude()
   const trip = useTrip(pos, sog)
   useEffect(() => { if (engHours != null) { try { localStorage.setItem('helm.engineHours', String(engHours)) } catch (e) {} } }, [engHours])
   const battHist = useHistory(battV)
@@ -224,6 +246,8 @@ export default function Instruments() {
     ? `${Math.abs(pos.latitude).toFixed(5)}° ${pos.latitude >= 0 ? 'N' : 'S'}   ${Math.abs(pos.longitude).toFixed(5)}° ${pos.longitude >= 0 ? 'E' : 'W'}`
     : null
 
+  const stMap = { ok: ['OK', GAUGE_COLORS.GREEN], warn: ['CHECK', GAUGE_COLORS.AMBER], alarm: ['ALARM', GAUGE_COLORS.RED], unknown: ['—', undefined] }
+  const [statusText, statusColor] = stMap[engStatus.level] || stMap.unknown
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', p: 1.5, gap: 1.5, overflow: 'hidden' }}>
       <Stack direction="row" alignItems="center" spacing={1.5} sx={{ flexShrink: 0 }}>
@@ -233,37 +257,37 @@ export default function Instruments() {
         <Chip size="small" clickable onClick={() => setDemo((d) => !d)} color={demo ? 'primary' : 'default'} variant={demo ? 'filled' : 'outlined'} label={demo ? 'Demo ON — tap to stop' : 'Demo'} />
       </Stack>
 
-      {/* Main area — RPM dead centre, full height; gauges fill left & right. */}
-      <Box sx={{ flex: 1, minHeight: 0, display: 'flex', gap: 1.5 }}>
-        <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-          <GaugeCard sx={{ flex: 1 }}><ArcGauge label="SPEED kn" value={sog} unit="kn" min={0} max={50} decimals={1} ticks={5} color={GAUGE_COLORS.BLUE} /></GaugeCard>
-          <GaugeCard sx={{ flex: 1 }}><ArcGauge label="ENGINE °C" value={engTemp} unit="°C" min={0} max={120} decimals={0} ticks={6} redline={0.83} zones={[{ from: 0.66, to: 0.83, color: GAUGE_COLORS.AMBER }]} color={GAUGE_COLORS.BLUE} /></GaugeCard>
-        </Box>
+      {/* Corner layout: RPM centre full-height; big COMPASS upper-right and
+          INCLINOMETER lower-left; engine temp & speed fill the other corners. */}
+      <Box sx={{ flex: 1, minHeight: 0, display: 'grid', gap: 1.5, gridTemplateColumns: '1.15fr 1.4fr 1.15fr', gridTemplateRows: '1fr 1fr' }}>
+        <GaugeCard sx={{ gridColumn: 1, gridRow: 1 }}><ArcGauge label="ENGINE °C" value={engTemp} unit="°C" min={0} max={120} decimals={0} ticks={6} redline={0.83} zones={[{ from: 0.66, to: 0.83, color: GAUGE_COLORS.AMBER }]} color={GAUGE_COLORS.BLUE} /></GaugeCard>
+        <GaugeCard sx={{ gridColumn: 1, gridRow: 2 }}><InclinometerGauge roll={attitude ? attitude.roll : null} pitch={attitude ? attitude.pitch : null} /></GaugeCard>
 
-        <Box sx={{ flex: 1.5, minWidth: 0, position: 'relative' }}>
-          <GaugeCard sx={{ height: '100%' }}><TachGauge value={rpm} min={0} max={7000} redline={0.857} /></GaugeCard>
+        <Box sx={{ gridColumn: 2, gridRow: '1 / 3', minHeight: 0, position: 'relative', display: 'flex' }}>
+          <GaugeCard sx={{ flex: 1 }}><TachGauge value={rpm} min={0} max={7000} redline={0.857} /></GaugeCard>
           {gear ? <GearIndicator gear={gear} /> : null}
         </Box>
 
-        <Box sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-          <GaugeCard sx={{ flex: 1.3 }}><CompassGauge heading={heading} cog={cog} /></GaugeCard>
-          <GaugeCard sx={{ flex: 1 }}><StatusGauge label="ENGINE" level={engStatus.level} detail={engStatus.detail} /></GaugeCard>
-        </Box>
+        <GaugeCard sx={{ gridColumn: 3, gridRow: 1 }}><CompassGauge heading={heading} cog={cog} /></GaugeCard>
+        <GaugeCard sx={{ gridColumn: 3, gridRow: 2 }}><ArcGauge label="SPEED kn" value={sog} unit="kn" min={0} max={50} decimals={1} ticks={5} color={GAUGE_COLORS.BLUE} /></GaugeCard>
       </Box>
 
-      {/* Bottom strip — combined battery, fuel, depth number, ambient, position. */}
-      <Box sx={{ flexShrink: 0, display: 'flex', gap: 1.5, height: 132 }}>
+      {/* Bottom strip */}
+      <Box sx={{ flexShrink: 0, display: 'flex', gap: 1.5, height: 128 }}>
+        <Tile label="ENGINE" value={statusText} accent={statusColor} sub={engStatus.detail && engStatus.detail !== 'ENGINE' ? engStatus.detail : ''}
+          sx={{ flex: 1, bgcolor: engStatus.level === 'alarm' ? 'rgba(255,59,48,0.20)' : engStatus.level === 'warn' ? 'rgba(255,181,46,0.14)' : GAUGE_BG,
+            border: engStatus.level === 'alarm' ? '1px solid rgba(255,59,48,0.7)' : engStatus.level === 'warn' ? '1px solid rgba(255,181,46,0.5)' : 'none' }} />
         <BatteryTile v={battV} a={battA} hist={battHist} />
         <Tile label="FUEL FLOW" value={fmt(fuelRate, 1)} unit={fuelRate == null ? '' : 'gph'} sx={{ flex: 1.4 }} accent={GAUGE_COLORS.BLUE}>
           <Box sx={{ mt: 0.25 }}><Sparkline data={fuelHist} color={GAUGE_COLORS.BLUE} min={0} height={30} /></Box>
         </Tile>
-        {fuelLevel != null ? <Box sx={{ flex: 1.2, display: 'flex' }}><FuelLevelTile pct={fuelLevel} /></Box> : null}
+        {fuelLevel != null ? <Box sx={{ flex: 2.4, display: 'flex' }}><FuelLevelTile pct={fuelLevel} /></Box> : null}
         <Tile label="DEPTH" value={depth == null ? '—' : fmt(depth * M_TO_FT, 0)} unit={depth == null ? '' : 'ft'} sx={{ flex: 0.9 }} accent={GAUGE_COLORS.BLUE} />
         <Tile label="AMBIENT" value={airT == null ? '—' : fmt(airT, 1)} unit={airT == null ? '' : '°C'} sx={{ flex: 0.9 }}
           icon={airT == null ? <ThermostatIcon /> : airT < 10 ? <AcUnitIcon /> : airT > 25 ? <WbSunnyIcon /> : <ThermostatIcon />}
           accent={airT == null ? undefined : airT < 10 ? GAUGE_COLORS.BLUE : airT > 25 ? GAUGE_COLORS.AMBER : undefined} />
         <Tile label="TRIP" value={trip.distance ? trip.distance.toFixed(1) : '0.0'} unit="nm" sx={{ flex: 0.9 }} accent={GAUGE_COLORS.BLUE} />
-        <Tile label="POSITION" value={posStr || '—'} valueSize="1.35rem" sx={{ flex: 2 }} accent={GAUGE_COLORS.BLUE} />
+        <Tile label="POSITION" value={posStr || '—'} valueSize="1.35rem" sx={{ flex: 1.9 }} accent={GAUGE_COLORS.BLUE} />
       </Box>
     </Box>
   )

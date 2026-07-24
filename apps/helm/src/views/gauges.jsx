@@ -221,4 +221,52 @@ export function WindGauge({ angle, speed, label = 'APP WIND', unit = 'kn' }) {
   )
 }
 
+// Inclinometer / artificial horizon from the ADXL345: heel (roll) tilts the horizon,
+// trim (pitch) shifts it up/down. Fixed boat reference in the centre; numbers below.
+export function InclinometerGauge({ roll, pitch, label = 'HEEL / TRIM' }) {
+  const has = roll != null && isFinite(roll)
+  const r = has ? roll : 0
+  const p = has ? (pitch || 0) : 0
+  const cx = 100, cy = 96, R = 78
+  const off = Math.max(-64, Math.min(64, p * 2.4)) // px offset for pitch
+  const SKY = '#1e5f80', SEA = '#0a1c14', HLINE = '#e8eef2'
+  const heelColor = Math.abs(r) >= 25 ? RED : Math.abs(r) >= 15 ? AMBER : GREEN
+  const tick = []
+  for (let a = -40; a <= 40; a += 10) {
+    const rad = (a - 90) * Math.PI / 180
+    const [x1, y1] = [cx + R * Math.cos(rad), cy + R * Math.sin(rad)]
+    const [x2, y2] = [cx + (R - (a % 20 === 0 ? 12 : 7)) * Math.cos(rad), cy + (R - (a % 20 === 0 ? 12 : 7)) * Math.sin(rad)]
+    tick.push(<line key={a} x1={x1} y1={y1} x2={x2} y2={y2} stroke={DIM} strokeWidth={a === 0 ? 3 : 1.8} />)
+  }
+  return (
+    <svg viewBox="0 0 200 210" preserveAspectRatio="xMidYMid meet" style={{ width: '100%', height: '100%', display: 'block' }}>
+      <defs><clipPath id="inclinoClip"><circle cx={cx} cy={cy} r={R} /></clipPath></defs>
+      <g clipPath="url(#inclinoClip)">
+        {has ? (
+          <g transform={`rotate(${-r} ${cx} ${cy}) translate(0 ${off})`}>
+            <rect x={cx - 240} y={cy - 300} width={480} height={300} fill={SKY} />
+            <rect x={cx - 240} y={cy} width={480} height={300} fill={SEA} />
+            <line x1={cx - 240} y1={cy} x2={cx + 240} y2={cy} stroke={HLINE} strokeWidth={2.5} />
+            {[-20, -10, 10, 20].map((pl) => (
+              <line key={pl} x1={cx - 16} y1={cy - pl * 2.4} x2={cx + 16} y2={cy - pl * 2.4} stroke="rgba(255,255,255,0.5)" strokeWidth={1.5} />
+            ))}
+          </g>
+        ) : <rect x={cx - R} y={cy - R} width={R * 2} height={R * 2} fill="rgba(255,255,255,0.04)" />}
+      </g>
+      <circle cx={cx} cy={cy} r={R} fill="none" stroke={TRACK} strokeWidth={2.5} />
+      {tick}
+      {/* roll pointer at the top */}
+      <polygon points={`${cx},${cy - R + 2} ${cx - 7},${cy - R + 14} ${cx + 7},${cy - R + 14}`} fill={heelColor} />
+      {/* fixed boat reference */}
+      <line x1={cx - 26} y1={cy} x2={cx - 10} y2={cy} stroke={AMBER} strokeWidth={3.5} />
+      <line x1={cx + 10} y1={cy} x2={cx + 26} y2={cy} stroke={AMBER} strokeWidth={3.5} />
+      <circle cx={cx} cy={cy} r={3.5} fill={AMBER} />
+      <text x={cx} y={cy + R + 30} textAnchor="middle" fontSize="26" fontWeight="800" fill={heelColor} fontFamily="inherit">{has ? `${Math.abs(Math.round(r))}°` : '—'}</text>
+      <text x={cx} y={cy + R + 30} dx="-58" textAnchor="middle" fontSize="12" fill={DIM} fontFamily="inherit">HEEL{has ? (r < 0 ? ' P' : ' S') : ''}</text>
+      <text x={cx} y={cy + R + 30} dx="58" textAnchor="middle" fontSize="15" fontWeight="700" fill={TXT} fontFamily="inherit">{has ? `${p >= 0 ? '+' : ''}${Math.round(p)}°` : ''}</text>
+      <text x={cx} y={cy + R + 30} dx="58" dy="14" textAnchor="middle" fontSize="11" fill={DIM} fontFamily="inherit">TRIM</text>
+    </svg>
+  )
+}
+
 export const GAUGE_COLORS = { BLUE, GREEN, AMBER, RED }
