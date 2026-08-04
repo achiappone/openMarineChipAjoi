@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { memo, useRef, useState } from 'react'
 // Lightweight SVG marine gauges. No chart library — plain SVG, updated at the
 // SignalK hook's ~4Hz, so they cost a fraction of the KIP webapp they replace.
 // All are theme-dark and render a graceful empty state (needle at min / "—").
@@ -29,7 +29,7 @@ function arc(cx, cy, r, a0, a1) {
 // 270° arc gauge (gap at the bottom) with tick marks, a needle, and an optional
 // redline. `zones`: [{from,to,color}] as fractions 0..1. `ticks`: number of major
 // divisions. `redline`: fraction 0..1 that colours the value red past it.
-export function ArcGauge({ label, value, unit, min = 0, max = 10, decimals = 1, color = BLUE, zones, ticks = 6, redline }) {
+function ArcGaugeImpl({ label, value, unit, min = 0, max = 10, decimals = 1, color = BLUE, zones, ticks = 6, redline }) {
   const START = 135, SWEEP = 270
   const has = value != null && isFinite(value)
   const frac = has ? clamp01((value - min) / (max - min)) : 0
@@ -106,7 +106,7 @@ function LampGlyph({ k, color }) {
 // minor ticks, a red needle, "×1000 r/min" under the hub, a digital readout, and a row
 // of engine warning lamps (check / temp / oil / water-in-fuel) with the engine temp
 // shown under the temp lamp. `indicators`: { check, temp, oil, water } each false | 'warn' | 'alarm'.
-export function TachGauge({ value, min = 0, max = 7000, redline = 0.857, label = 'r/min', indicators, engTempF, onTempClick }) {
+function TachGaugeImpl({ value, min = 0, max = 7000, redline = 0.857, label = 'r/min', indicators, engTempF, onTempClick }) {
   const START = 135, SWEEP = 270
   const has = value != null && isFinite(value)
   const frac = has ? clamp01((value - min) / (max - min)) : 0
@@ -170,7 +170,7 @@ export function TachGauge({ value, min = 0, max = 7000, redline = 0.857, label =
 }
 
 // Tiny filled sparkline for a value's recent history. Stretches to fill its box.
-export function Sparkline({ data, color = BLUE, min, max, height = 42 }) {
+function SparklineImpl({ data, color = BLUE, min, max, height = 42 }) {
   const pts = (data || []).filter((v) => v != null && isFinite(v))
   const W = 100, H = height
   if (pts.length < 2) return <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height, display: 'block' }} />
@@ -188,7 +188,7 @@ export function Sparkline({ data, color = BLUE, min, max, height = 42 }) {
 }
 
 // Big status light for engine/system health. `level`: 'ok' | 'warn' | 'alarm' | 'unknown'.
-export function StatusGauge({ label, level = 'unknown', detail }) {
+function StatusGaugeImpl({ label, level = 'unknown', detail }) {
   const map = {
     ok: { c: GREEN, t: 'OK' }, warn: { c: AMBER, t: 'WARNING' },
     alarm: { c: RED, t: 'ALARM' }, unknown: { c: DIM, t: '—' },
@@ -207,7 +207,7 @@ export function StatusGauge({ label, level = 'unknown', detail }) {
 
 // Compass: rotating outer card with cardinal ticks, fixed top pointer = heading.
 // COG (if present) shown as a secondary tick.
-export function CompassGauge({ heading, cog, label = 'HEADING' }) {
+function CompassGaugeImpl({ heading, cog, label = 'HEADING' }) {
   const has = heading != null && isFinite(heading)
   const cx = 100, cy = 100, r = 82
   const rot = has ? -heading : 0 // rotate the card so the heading sits under the top pointer
@@ -239,7 +239,7 @@ export function CompassGauge({ heading, cog, label = 'HEADING' }) {
 
 // Wind dial: boat bow at top; needle points to the wind's bearing relative to bow.
 // Apparent wind angle is signed (− port / + starboard); coloured accordingly.
-export function WindGauge({ angle, speed, label = 'APP WIND', unit = 'kn' }) {
+function WindGaugeImpl({ angle, speed, label = 'APP WIND', unit = 'kn' }) {
   const has = angle != null && isFinite(angle)
   const cx = 100, cy = 100, r = 82
   const side = has ? (angle < 0 ? RED : GREEN) : DIM
@@ -271,7 +271,7 @@ export function WindGauge({ angle, speed, label = 'APP WIND', unit = 'kn' }) {
 // Inclinometer / artificial horizon from the accelerometer's gravity vector (ICM20948,
 // or ADXL345 as fallback): heel (roll) tilts the horizon, trim (pitch) shifts it up/down.
 // Fixed boat reference in the centre; numbers below.
-export function InclinometerGauge({ roll, pitch, label = 'HEEL / TRIM' }) {
+function InclinometerGaugeImpl({ roll, pitch, label = 'HEEL / TRIM' }) {
   const has = roll != null && isFinite(roll)
   const r = has ? roll : 0
   const p = has ? (pitch || 0) : 0
@@ -317,12 +317,75 @@ export function InclinometerGauge({ roll, pitch, label = 'HEEL / TRIM' }) {
   )
 }
 
+
+// Top-down boat silhouette drawn at the centre of the compass. From the HMI concept the
+// owner picked: the vessel sits inside the rose rather than beside it, so heading, course
+// and attitude all read against one picture of the boat.
+// Bow-up in a 40x100 box centred on (0,0); the caller positions and scales it.
+// Hull outline for a dual-console boat, seen from above: fine entry at the bow, flare
+// through the shoulders, near-parallel topsides aft, square transom. Used both as the
+// silhouette and as the clip path for the attitude fill.
+const HULL_PATH = 'M 0 -52 C 8 -43 15 -29 18.5 -15 C 20.9 -5 21.5 4 21.5 14 L 21.5 38 C 21.5 44.5 18 47 0 47 C -18 47 -21.5 44.5 -21.5 38 L -21.5 14 C -21.5 4 -20.9 -5 -18.5 -15 C -15 -29 -8 -43 0 -52 Z'
+
+// The boat, drawn big enough that its bow reaches the compass ring — so the hull itself
+// points at the heading instead of a separate marker doing it.
+//
+// The gyro fills the hull rather than driving a separate horizon disc: the waterline
+// inside the boat tilts with heel and rises with trim, clipped to the hull outline. One
+// picture answers "where am I pointing" and "how am I sitting", which is how you actually
+// read a boat.
+function BoatGlyph({ scale = 1, roll = 0, pitch = 0, hasAttitude = false, id = 'hull' }) {
+  const off = Math.max(-30, Math.min(30, (pitch || 0) * 1.1))   // trim shifts the waterline
+  const DECK = 'rgba(232,238,242,0.34)'
+  const DECK_SOFT = 'rgba(232,238,242,0.20)'
+  return (
+    <g transform={`scale(${scale})`}>
+      <defs>
+        <clipPath id={`${id}-clip`}><path d={HULL_PATH} /></clipPath>
+      </defs>
+      <path d={HULL_PATH} fill="rgba(232,238,242,0.10)" stroke="rgba(232,238,242,0.85)" strokeWidth="2" />
+      {hasAttitude ? (
+        <g clipPath={`url(#${id}-clip)`}>
+          <g transform={`rotate(${-roll}) translate(0 ${off})`}>
+            <rect x="-70" y="0" width="140" height="130" fill="rgba(57,198,216,0.42)" />
+            <line x1="-70" y1="0" x2="70" y2="0" stroke="#39c6d8" strokeWidth="2.5" />
+          </g>
+        </g>
+      ) : null}
+
+      {/* Bow cockpit: seating down both sides with the walkway between them. */}
+      <path d="M -11 -34 L -14 -13 L -8 -13 L -6 -33 Z" fill={DECK_SOFT} />
+      <path d="M 11 -34 L 14 -13 L 8 -13 L 6 -33 Z" fill={DECK_SOFT} />
+
+      {/* The two consoles, port and starboard, with the walkthrough gap between them that
+          makes this a dual console rather than a centre console. */}
+      <rect x="-15.5" y="-10" width="10.5" height="16" rx="3" fill={DECK} />
+      <rect x="5" y="-10" width="10.5" height="16" rx="3" fill={DECK} />
+      {/* split windshield, one panel above each console */}
+      <path d="M -15.5 -10.5 L -5 -10.5 L -6.5 -14.5 L -14 -14.5 Z" fill="rgba(57,198,216,0.55)" />
+      <path d="M 5 -10.5 L 15.5 -10.5 L 14 -14.5 L 6.5 -14.5 Z" fill="rgba(57,198,216,0.55)" />
+
+      {/* helm and companion seats, then the aft bench across the cockpit */}
+      <rect x="-14" y="8" width="9.5" height="7" rx="2.5" fill={DECK_SOFT} />
+      <rect x="4.5" y="8" width="9.5" height="7" rx="2.5" fill={DECK_SOFT} />
+      <rect x="-17.5" y="30" width="35" height="8" rx="3" fill={DECK_SOFT} />
+
+      {/* transom and the single centre outboard */}
+      <rect x="-17.5" y="42.5" width="35" height="4.5" rx="1.5" fill={DECK} />
+      <rect x="-4.5" y="46" width="9" height="13" rx="3" fill="rgba(232,238,242,0.6)" />
+      <rect x="-2" y="58" width="4" height="4" rx="1.5" fill="rgba(232,238,242,0.45)" />
+
+      <path d={HULL_PATH} fill="none" stroke="rgba(232,238,242,0.9)" strokeWidth="2" />
+    </g>
+  )
+}
+
 // Combined attitude + heading instrument. Heading, heel and trim all come from the one
 // ICM20948, and in use they answer a single question — how is the boat sitting, and
 // where is it pointing — so they share one dial: a rotating compass card around an
 // artificial horizon. Same idea as an aircraft HSI, and it buys a much bigger horizon
 // than two half-height gauges could.
-export function AttitudeCompassGauge({ heading, cog, roll, pitch, label = 'HEADING', bezel = null, onBezel }) {
+function AttitudeCompassGaugeImpl({ heading, cog, roll, pitch, label = 'HEADING', bezel = null, onBezel }) {
   const hasH = heading != null && isFinite(heading)
   const svgRef = useRef(null)
   const hasBez = bezel != null && isFinite(bezel)
@@ -364,25 +427,25 @@ export function AttitudeCompassGauge({ heading, cog, roll, pitch, label = 'HEADI
       onPointerCancel={() => setDragging(false)}>
       <defs><clipPath id="horizonClip"><circle cx={cx} cy={cy} r={HR} /></clipPath></defs>
 
-      {/* artificial horizon: tilts with heel, slides with trim */}
-      <g clipPath="url(#horizonClip)">
-        {hasR ? (
-          <g transform={`rotate(${-r} ${cx} ${cy}) translate(0 ${off})`}>
-            <rect x={cx - 220} y={cy - 280} width={440} height={280} fill={SKY} />
-            <rect x={cx - 220} y={cy} width={440} height={280} fill={SEA} />
-            <line x1={cx - 220} y1={cy} x2={cx + 220} y2={cy} stroke={HLINE} strokeWidth={2.5} />
-            {[-20, -10, 10, 20].map((t) => (
-              <line key={t} x1={cx - 14} y1={cy - t * 2.2} x2={cx + 14} y2={cy - t * 2.2} stroke="rgba(255,255,255,0.45)" strokeWidth={1.4} />
-            ))}
-          </g>
-        ) : <rect x={cx - HR} y={cy - HR} width={HR * 2} height={HR * 2} fill="rgba(255,255,255,0.04)" />}
-      </g>
-      <circle cx={cx} cy={cy} r={HR} fill="none" stroke={TRACK} strokeWidth={2} />
 
-      {/* fixed boat reference over the horizon */}
-      <line x1={cx - 24} y1={cy} x2={cx - 9} y2={cy} stroke={AMBER} strokeWidth={3.5} />
-      <line x1={cx + 9} y1={cy} x2={cx + 24} y2={cy} stroke={AMBER} strokeWidth={3.5} />
-      <circle cx={cx} cy={cy} r={3.2} fill={AMBER} />
+      {/* Bow reaches the tick ring: the hull is the heading pointer. */}
+      <g transform={`translate(${cx} ${cy})`}>
+        <BoatGlyph scale={(R - 8) / 50} roll={hasR ? r : 0} pitch={p} hasAttitude={hasR} />
+      </g>
+
+      {/* COG as a dashed line off the boat, labelled — the reference's clearest idea:
+          heading is where she points, COG is where she is actually going. */}
+      {cog != null && isFinite(cog) && hasH ? (() => {
+        const rel = ((cog - heading + 540) % 360) - 180
+        const [ex, ey] = polar(cx, cy, HR + 14, rel - 90)
+        const [lx, ly] = polar(cx, cy, HR + 26, rel - 90)
+        return (
+          <g>
+            <line x1={cx} y1={cy} x2={ex} y2={ey} stroke={GREEN} strokeWidth={1.6} strokeDasharray="4 3" opacity={0.9} />
+            <text x={lx} y={ly + 3} textAnchor="middle" fontSize="10" fontWeight="800" fill={GREEN} fontFamily="inherit">COG</text>
+          </g>
+        )
+      })() : null}
 
       {/* rotating compass card */}
       <circle cx={cx} cy={cy} r={R + 6} fill="none" stroke={TRACK} strokeWidth={2} />
@@ -468,4 +531,12 @@ export function AttitudeCompassGauge({ heading, cog, roll, pitch, label = 'HEADI
   )
 }
 
+export const ArcGauge = memo(ArcGaugeImpl)
+export const TachGauge = memo(TachGaugeImpl)
+export const Sparkline = memo(SparklineImpl)
+export const StatusGauge = memo(StatusGaugeImpl)
+export const CompassGauge = memo(CompassGaugeImpl)
+export const WindGauge = memo(WindGaugeImpl)
+export const InclinometerGauge = memo(InclinometerGaugeImpl)
+export const AttitudeCompassGauge = memo(AttitudeCompassGaugeImpl)
 export const GAUGE_COLORS = { BLUE, GREEN, AMBER, RED }

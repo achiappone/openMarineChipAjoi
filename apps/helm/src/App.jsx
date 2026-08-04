@@ -11,8 +11,8 @@ import { createRadioClient } from './stereo/stereoClient'
 import { VOL_MAX } from './stereo/stereoControl'
 import useSignalKStatus from './hooks/useSignalKStatus'
 import SoftkeyRail, { SoftkeyProvider, useSoftkeyInput, loadSoftkeyGeom } from './components/Softkeys'
-import { KnobDial } from './components/KnobOverlay'
-import { LiveControlsProvider } from './lib/liveControls'
+import ControlCards, { CARD_W, CARD_H } from './components/ControlCards'
+import { useLiveControls } from './lib/liveControls'
 
 // Root-absolute so it works both on the Pi (same origin :3000) and via the Vite
 // dev proxy on the laptop.
@@ -22,6 +22,12 @@ const SVC = `http://${location.hostname}:8082`
 // Volume slider whose track IS a live audio level meter (fed by the stereo
 // spectrum feed): the coloured fill reacts to the music while the fader thumb
 // still sets the volume. Green→amber→red with a peak-hold marker.
+// Subscribes on its own so a knob detent re-renders one <span>, not the app.
+function LiveVolumeNumber({ polled }) {
+  const live = useLiveControls()
+  return <>{live.volume != null ? live.volume : polled}</>
+}
+
 function VolumeSlider({ value, muted, onCommit }) {
   const maskRef = useRef(null), peakRef = useRef(null)
   const levelRef = useRef(0), pkRef = useRef(0), mutedRef = useRef(muted)
@@ -29,7 +35,10 @@ function VolumeSlider({ value, muted, onCommit }) {
   // Dragging is purely frontend/instant (local state, no backend, no app re-render);
   // the volume is pushed to the backend only once, when the finger lifts.
   const [dragVal, setDragVal] = useState(null)
-  const shown = dragVal != null ? dragVal : (muted ? 0 : value)
+  const live = useLiveControls()
+  // Priority: your finger, then the knob, then the polled state.
+  const base = live.volume != null ? live.volume : value
+  const shown = dragVal != null ? dragVal : (muted ? 0 : base)
   const handleCommit = (_, v) => { onCommit(v); setDragVal(null) }
   useEffect(() => {
     let es
@@ -235,34 +244,7 @@ function AppShell() {
   tabRef.current = tab
   const stereoRef = useRef(null)
   stereoRef.current = stereo
-  // Knob-driven volume, applied optimistically. The service is authoritative, but its
-  // state is polled every 2s — far too slow to follow a knob, which is why turning it
-  // looked dead until you stopped.
-  const [knobVol, setKnobVol] = useState(null)
-  const knobVolAt = useRef(0)
-  const [knobFreq, setKnobFreq] = useState(null)
-  const knobFreqAt = useRef(0)
-  // Live knob activity for the popup: the value being changed, which way, and a timer
-  // that hides it shortly after you stop turning.
-  const [knobLive, setKnobLive] = useState({ value: null, dir: 0, at: 0 })
-  const [knobTurning, setKnobTurning] = useState(false)
-  const knobHide = useRef(null)
-  const bumpKnob = (value, dir) => {
-    setKnobLive({ value, dir, at: Date.now() })
-    setKnobTurning(true)
-    clearTimeout(knobHide.current)
-    knobHide.current = setTimeout(() => setKnobTurning(false), 900)
-  }
   const { flash, mode } = useSoftkeyInput({
-    onVolume: (v) => {
-      setKnobVol((prev) => { bumpKnob(v, prev == null ? 0 : Math.sign(v - prev)); return v })
-      knobVolAt.current = Date.now()
-    },
-    onTune: (f) => {
-      setKnobFreq((prev) => { bumpKnob(f, prev == null ? 0 : Math.sign(f - prev)); return f })
-      knobFreqAt.current = Date.now()
-    },
-    onDelta: (d) => bumpKnob(knobLive.value, Math.sign(d)),
     onScreenCycle: () => setTab((t) => TABS[(TABS.findIndex((x) => x.id === t) + 1) % TABS.length].id),
     onHome: () => setTab('instruments'),
     onKey: (idx) => {
@@ -273,39 +255,12 @@ function AppShell() {
       if (t === 'stereo' || t === 'all' || t === 'split') return stepPreset(idx === 1 ? 1 : -1, stereoRef.current)
     },
   })
-  useEffect(() => {
-    if (knobVol == null) return
-    if (stereo && stereo.volume === knobVol) { setKnobVol(null); return }
-    const t = setTimeout(() => setKnobVol(null), 2500)   // safety: never stick
-    return () => clearTimeout(t)
-  }, [knobVol, stereo && stereo.volume])
-  const shownVol = knobVol != null ? knobVol : (stereo ? stereo.volume : 0)
-  useEffect(() => {
-    if (knobFreq == null) return
-    if (stereo && stereo.fm && Math.abs(stereo.fm.freq - knobFreq) < 0.01) { setKnobFreq(null); return }
-    const t = setTimeout(() => setKnobFreq(null), 4000)
-    return () => clearTimeout(t)
-  }, [knobFreq, stereo && stereo.fm && stereo.fm.freq])
-  const shownFreq = knobFreq != null ? knobFreq : (stereo && stereo.fm ? stereo.fm.freq : null)
 
   const [geom, setGeom] = useState(loadSoftkeyGeom)
   // Per-screen defaults so the rail is never blank. A view can override any slot by
   // registering its own with useSoftkeys(); these are what show until it does.
   const KNOB = { volume: 'VOLUME', tune: 'FM TUNE', nav: 'NAVIGATE', value: 'ADJUST' }
-  // The knob key always shows the value it controls, not just while turning — the point
-  // of a knob is knowing where it is before you touch it.
-  const knobKey = mode === 'volume'
-    ? { label: `${shownVol}`, sub: 'VOLUME' }
-    : mode === 'tune'
-      ? { label: shownFreq != null ? shownFreq.toFixed(1) : '—',
-          sub: (stereo && stereo.nowPlaying && stereo.nowPlaying.title && stereo.nowPlaying.title !== 'FM Radio')
-            ? stereo.nowPlaying.title : 'FM' }
-      : { label: 'KNOB', sub: KNOB[mode] || mode }
-  // While the knob is turning, slot 4 becomes the dial — same space, so nothing else on
   // screen moves, and the label it replaces is the one describing that very knob.
-  const knobValue = mode === 'volume' ? shownVol : mode === 'tune' ? shownFreq : knobLive.value
-  const knobSub = mode === 'tune' && stereo && stereo.nowPlaying && stereo.nowPlaying.title !== 'FM Radio'
-    ? stereo.nowPlaying.title : null
   const skOverrides = []
   const skDefaults = (
     tab === 'plotter' ? [{ label: 'VIEW', sub: 'hold = home' }, { label: 'ZOOM +' }, { label: 'ZOOM −' }]
@@ -318,38 +273,21 @@ function AppShell() {
     return () => window.removeEventListener('helm-softkeys-geom', on)
   }, [])
 
-  const liveCtl = { volume: knobVol, freq: knobFreq, mode, turning: knobTurning }
+  // One number owns the right edge. The softkey labels and the knob cards used to be
+  // independent fixed-position overlays, each hoping the content had padded enough for it
+  // — so the cards, being the wider of the two, sat on top of the GPS row and the task
+  // bar. Now the shell is a grid with a real rail column, and everything in it is sized
+  // from RAIL_W. Content can't run under the rail because the grid won't let it.
+  const RAIL_W = Math.max(geom.enabled ? geom.width : 0, CARD_W)
+
   return (
-    <LiveControlsProvider value={liveCtl}>
-    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column',
-      // Keep content clear of the rail so labels never sit on top of a gauge.
-      pr: geom.enabled ? `${geom.width}px` : 0 }}>
-      <SoftkeyRail geom={geom} flash={flash} defaults={skDefaults} overrides={skOverrides} />
-      {/* Big dial in the bottom-right corner while the knob is turning. Large enough to
-          read at a glance from the wheel, and it fades out rather than snapping so it
-          doesn't feel like a popup fighting for attention. */}
-      {geom.knobPopup !== false ? (
-        <Box sx={{
-          // Sunk into the corner: half of it hangs off the right edge so two quadrants
-          // show. Always present — a knob you can't see the position of is a knob you
-          // have to test by ear — but dimmed until you touch it.
-          position: 'fixed', zIndex: 1500, pointerEvents: 'none',
-          width: `min(${geom.knobSize || 260}px, 46vh)`,
-          right: `calc(min(${geom.knobSize || 260}px, 46vh) / -2)`,
-          bottom: `calc(min(${geom.knobSize || 260}px, 46vh) / -6)`,
-          opacity: knobTurning ? 1 : 0.32,
-          transition: knobTurning ? 'opacity 70ms linear' : 'opacity 500ms ease-out',
-        }}>
-          <KnobDial mode={mode} value={knobValue} dir={knobLive.dir} sub={knobSub}
-            presets={(stereo && stereo.fm && stereo.fm.presets) || []} />
-        </Box>
-      ) : null}
+    <Box sx={{ height: '100%', display: 'grid', gridTemplateColumns: `1fr ${RAIL_W}px`, gridTemplateRows: '1fr auto' }}>
       {/* Surfaces — all mounted, positioned per tab */}
-      <Box sx={{ position: 'relative', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+      <Box sx={{ gridColumn: 1, gridRow: 1, position: 'relative', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
         <Surface rect={L.plotter}><EmbeddedApp src={FREEBOARD} title="Plotter (Freeboard-SK)" /></Surface>
         {/* Native instruments (replaces the heavy embedded KIP app): reads SignalK
             deltas directly and is far lighter on the renderer. */}
-        <Surface rect={L.instruments}><Instruments /></Surface>
+        <Surface rect={L.instruments}><Instruments active={tab === 'instruments' || tab === 'all' || tab === 'split'} /></Surface>
         <Surface rect={L.stereo}><StereoView big={tab === 'stereo'} /></Surface>
         {/* Dedicated compact stereo section — used by the All view and Split panes. */}
         {(tab === 'all' || tab === 'split') && <Surface rect={L.stereoCompact}><StereoCompact /></Surface>}
@@ -370,6 +308,14 @@ function AppShell() {
         ))}
       </Box>
 
+      {/* The right rail: softkey labels up top against the bezel buttons, knob cards at
+          the bottom. Spans both rows so the labels' vertical percentages still line up
+          with the physical keys, and so the cards sit beside the task bar, not over it. */}
+      <Box sx={{ gridColumn: 2, gridRow: '1 / 3', position: 'relative', minWidth: 0 }}>
+        <SoftkeyRail geom={geom} flash={flash} defaults={skDefaults} overrides={skOverrides} />
+        <ControlCards />
+      </Box>
+
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)}
 
         settings={stereo ? stereo.settings : null} onChange={(patch) => stereoCtl.current && stereoCtl.current.setSettings(patch)}
@@ -377,18 +323,20 @@ function AppShell() {
         tab={settingsTab} onTabChange={setSettingsTab} bt={(stereo && stereo.bluetooth) || {}} c={stereoCtl.current} />
 
 
-      {/* Page buttons — bottom bar, right-aligned; global MUTE centered. */}
-      <Box sx={{ flexShrink: 0, bgcolor: 'background.paper', borderTop: '1px solid rgba(255,255,255,0.12)',
-        // Clear the two quadrants of dial poking into this corner.
-        pr: geom.knobPopup !== false ? `calc(min(${geom.knobSize || 260}px, 46vh) / 2 + 10px)` : 0 }}>
-        <Stack direction="row" alignItems="center">
+      {/* Page buttons — bottom bar, right-aligned; global MUTE centered. Styled as a card
+          the same height as the VOLUME card beside it, so the bottom edge reads as one row
+          of cards rather than a bar with something floating next to it. */}
+      <Box sx={{ gridColumn: 1, gridRow: 2, minWidth: 0, height: CARD_H, ml: 1, mb: 1, mr: '5px',
+        bgcolor: 'rgba(4,7,11,0.86)', border: '2px solid rgba(255,255,255,0.14)', borderRadius: 2.5,
+        overflow: 'hidden' }}>
+        <Stack direction="row" alignItems="center" sx={{ height: '100%' }}>
           {/* Global volume — wide, filling the left up to the MUTE button. */}
           <Stack direction="row" alignItems="center" spacing={1.5} sx={{ flex: 1, minWidth: 0, pl: 3, pr: 2 }}>
             {muted ? <VolumeOffIcon sx={{ color: 'error.main' }} /> : <VolumeUpIcon sx={{ opacity: 0.7 }} />}
-            <VolumeSlider value={shownVol} muted={muted}
+            <VolumeSlider value={stereo ? stereo.volume : 0} muted={muted}
               onCommit={(v) => stereoCtl.current && stereoCtl.current.setVolume(v)} />
             <Typography sx={{ width: 30, textAlign: 'right', fontWeight: 700, fontSize: '1.1rem', fontVariantNumeric: 'tabular-nums' }}>
-              {muted ? 'M' : shownVol}
+              {muted ? 'M' : <LiveVolumeNumber polled={stereo ? stereo.volume : 0} />}
             </Typography>
           </Stack>
           {/* MUTE button */}
@@ -412,7 +360,8 @@ function AppShell() {
           />
           <Tabs
             value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" scrollButtons={false}
-            sx={{ minHeight: 68, '& .MuiTab-root': { minHeight: 68, px: 3.5, py: 0, fontSize: '1.35rem', fontWeight: 800 } }}
+            sx={{ minHeight: 0, height: '100%', '& .MuiTabs-flexContainer': { height: '100%' },
+              '& .MuiTab-root': { minHeight: 0, height: '100%', px: 3, py: 0, fontSize: '1.3rem', fontWeight: 800 } }}
           >
             {TABS.map((t) => <Tab key={t.id} value={t.id} label={t.label} />)}
           </Tabs>
@@ -425,7 +374,6 @@ function AppShell() {
         </Stack>
       </Box>
     </Box>
-    </LiveControlsProvider>
   )
 }
 

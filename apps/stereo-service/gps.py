@@ -407,6 +407,12 @@ def main():
     emit("READY")
 
     last_save = 0.0
+    # Time aiding is decided at startup, which on a cold boot happens before
+    # systemd-timesyncd has finished its first sync — so the check correctly says "no
+    # clock" and the receiver never gets a time it could have had 20 seconds later.
+    # Keep looking for a while and inject the moment the clock becomes trustworthy.
+    started = time.time()
+    last_time_try = 0.0
     buf = b""
     have_ver = False
     quiet_since = time.time()
@@ -419,6 +425,14 @@ def main():
                 s.write(POLL_RF); last_rf = now
             if not have_ver and now - last_ver > VER_RETRY:
                 s.write(POLL_VER); last_ver = now
+            if not aid["time"] and now - last_time_try > 10 and now - started < 900:
+                last_time_try = now
+                if clock_synced():
+                    s.write(mga_ini_time_utc()); s.flush()
+                    aid["time"] = 1
+                    emit(kv("#AID", aid))
+                    sys.stderr.write("clock synced late - time aiding injected %ds after start\n"
+                                     % int(now - started))
 
             chunk = s.read(4096)
             if chunk:

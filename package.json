@@ -11,7 +11,12 @@
     "deploy:health": "ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook -i ansible/hosts ansible/deploy_app.yml -e app=pi-health",
     "deploy:helm": "ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook -i ansible/hosts ansible/deploy_helm.yml",
     "maintain": "ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook -i ansible/hosts ansible/maintenance.yml",
-    "helm:dev": "npm --prefix apps/helm run dev"
+    "helm:dev": "npm --prefix apps/helm run dev",
+    "logs": "ssh -t openplotter 'sudo journalctl -u stereo-service -u signalk -f -n 80 -o cat'",
+    "logs:stereo": "ssh -t openplotter 'sudo journalctl -u stereo-service -f -n 120 -o cat'",
+    "logs:signalk": "ssh -t openplotter 'sudo journalctl -u signalk -f -n 120 -o cat'",
+    "logs:gps": "ssh -t openplotter 'sudo journalctl -u stereo-service -f -n 200 -o cat | grep --line-buffered -iE \"gps|nmea|assist|aiding|ubx|clock\"'",
+    "logs:sensors": "ssh -t openplotter 'sudo journalctl -u stereo-service -f -n 200 -o cat | grep --line-buffered -iE \"imu|mag|enc|i2c|io read\"'"
   },
   "engines": {
     "node": ">=22"

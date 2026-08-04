@@ -169,6 +169,10 @@ MAG_CAL_PATH = os.environ.get("MAG_CAL", os.path.join(_HERE, "magcal.json"))
 MAG_UDP = ("127.0.0.1", int(os.environ.get("MAG_UDP", "10111")))  # SignalK NMEA0183 in
 MAG_NMEA = os.environ.get("MAG_NMEA", "1") != "0"   # emit $HCHDM to SignalK
 MAG_DEV = float(os.environ.get("MAG_DEV", "0"))     # constant offset added, degrees
+# Dry polls before the magnetometer is assumed wedged and re-armed (~3 s at 10 Hz).
+MAG_STALL_POLLS = int(os.environ.get("MAG_STALL_POLLS", "30"))
+# Seconds without a fresh sample before heading is withheld instead of repeated.
+MAG_MAX_AGE = float(os.environ.get("MAG_MAX_AGE", "5"))
 MAG_REVERSE = os.environ.get("MAG_REVERSE", "0") == "1"  # flip rotation sense
 MAGCAL = None  # {"off": [x,y,z], "scale": [x,y,z]} once loaded
 BUS = int(os.environ.get("IMU_BUS", "1"))
@@ -252,13 +256,41 @@ def load_magcal():
     MAGCAL = None
 
 
+_mag_dry = 0   # consecutive polls with no fresh sample, for the stall watchdog
+
+
 def read_mag_raw(bus):
     # ST1 bit0 = DRDY. Returns raw counts in the ICM's accel/gyro frame, or None if no
     # fresh sample. ST2 must be read to release the measurement, even when discarding.
+    #
+    # That release is not optional and not recoverable if missed. The AK09916 will not
+    # start another conversion until ST2 is read, so a single I2C glitch between the data
+    # block and the ST2 read wedges it: DRDY never sets again, this returns None forever,
+    # and the caller keeps re-emitting its last heading. The compass then reads as a
+    # perfectly steady bearing that happens to be wrong, which is worse than no compass at
+    # all. Hence the finally, and hence the watchdog.
+    global _mag_dry
     if not (bus.read_byte_data(AK, 0x10) & 0x01):
+        _mag_dry += 1
+        if _mag_dry >= MAG_STALL_POLLS:
+            try:
+                bus.read_i2c_block_data(AK, 0x11, 6)
+                bus.read_byte_data(AK, 0x18)          # release whatever is latched
+                bus.write_byte_data(AK, 0x31, 0x06)   # CNTL2: continuous mode 3 (50 Hz)
+                sys.stderr.write("mag stalled after %d dry polls: re-armed\n" % _mag_dry)
+            except Exception as e:
+                sys.stderr.write("mag re-arm failed: %s\n" % e)
+            sys.stderr.flush()
+            _mag_dry = 0
         return None
-    d = bus.read_i2c_block_data(AK, 0x11, 6)   # HXL..HZH, little-endian (unlike the ICM)
-    st2 = bus.read_byte_data(AK, 0x18)
+    try:
+        d = bus.read_i2c_block_data(AK, 0x11, 6)   # HXL..HZH, little-endian (unlike the ICM)
+    finally:
+        try:
+            st2 = bus.read_byte_data(AK, 0x18)
+        except Exception:
+            st2 = 0
+    _mag_dry = 0
     if st2 & 0x08:                             # HOFL: magnetic overflow, data invalid
         return None
     x, y, z = struct.unpack("<hhh", bytes(d))
@@ -598,6 +630,7 @@ def main():
     sys.stdout.write("READY\n"); sys.stdout.flush()
     rf = pf = None
     hf = None  # smoothed heading, degrees
+    mag_at = time.time()   # when the magnetometer last yielded a fresh sample
     tempC = htuC = hum = shtC = shtH = float("nan")
     ioA = ioB = None  # MCP23017 input ports, None when the expander is absent
     period = 1.0 / HZ
@@ -640,7 +673,15 @@ def main():
             if have_mag and rf is not None:
                 try:
                     mag = read_mag(bus)
-                    if mag is not None:
+                    if mag is None:
+                        # No fresh field for a while: withhold the heading. A blank
+                        # compass tells you it is blank; a frozen one does not.
+                        if hf is not None and time.time() - mag_at > MAG_MAX_AGE:
+                            hf = None
+                            sys.stderr.write("mag stale >%.0fs: heading withheld\n" % MAG_MAX_AGE)
+                            sys.stderr.flush()
+                    else:
+                        mag_at = time.time()
                         h = tilt_heading(mag_to_attitude_frame(mag), rf, pf)
                         # Smooth along the shortest arc, not the raw number: a plain EMA
                         # across the 359->0 wrap would swing the long way round and park

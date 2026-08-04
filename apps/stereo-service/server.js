@@ -2012,7 +2012,14 @@ startEncoder()
 function startImu() {
   const imuPath = `${__dirname}/imu.py`
   try { if (!fs.existsSync(imuPath)) return } catch (e) { return }
-  imuProc = spawn('python3', [imuPath], { stdio: ['ignore', 'pipe', 'ignore'] })
+  // stderr was 'ignore', which threw away every diagnostic imu.py writes — sensor init
+  // failures, magcal status, stalled-magnetometer warnings. A frozen compass sat on
+  // screen for hours reporting a stale heading with nothing in the log to say so.
+  imuProc = spawn('python3', [imuPath], { stdio: ['ignore', 'pipe', 'pipe'] })
+  imuProc.stderr.on('data', (d) => {
+    const t = d.toString().trim()
+    if (t) console.error(`[imu] ${t}`)
+  })
   let buf = ''
   imuProc.stdout.on('data', (d) => {
     buf += d.toString()

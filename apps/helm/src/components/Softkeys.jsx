@@ -51,7 +51,10 @@ export default function SoftkeyRail({ geom, flash, defaults = [], overrides = []
   const { keys } = useContext(SoftkeyContext)
   if (!geom.enabled) return null
   return (
-    <Box sx={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: geom.width, pointerEvents: 'none', zIndex: 1200 }}>
+    // Fills the shell's rail column. The labels stay hard against the right edge at their
+    // calibrated size, because they have to line up with real buttons on the bezel — the
+    // column being wider than they are is what keeps the page content clear of them.
+    <Box sx={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, pointerEvents: 'none', zIndex: 1200 }}>
       {Array.from({ length: LABEL_COUNT }).map((_, i) => {
         const k = keys[i] || defaults[i] || null
         const topPct = geom.top + i * geom.spacing

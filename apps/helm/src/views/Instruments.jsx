@@ -11,21 +11,75 @@ import { gpsSummary } from '../lib/nmea'
 import { useDemo } from '../lib/demoMode'
 import { ArcGauge, TachGauge, CompassGauge, StatusGauge, InclinometerGauge, AttitudeCompassGauge, Sparkline, GAUGE_COLORS, GAUGE_BG } from './gauges'
 
+
+// Static sx objects, hoisted out of render.
+//
+// `sx={{...}}` builds a fresh object every render, and Emotion re-serialises each one
+// into CSS. With ~700 of them across the app and the instrument panel re-rendering
+// several times a second, that serialisation — not the SVG, not the data — is where the
+// renderer's time goes. A module-scope object has a stable identity, so the style engine
+// can short-circuit instead of re-doing the work.
+const SX_FILL = { width: '100%', height: '100%', minHeight: 0 }
+const SX_TILE_LABEL = { opacity: 0.55, fontSize: '0.78rem', letterSpacing: 1.5, fontWeight: 700 }
+const SX_TILE_ROW = { width: '100%' }
+const SX_TILE_VALROW = { minWidth: 0 }
+const SX_TILE_UNIT = { opacity: 0.6, fontSize: '1rem', fontWeight: 600 }
+const SX_TILE_SUB = { opacity: 0.5, fontSize: '0.78rem' }
+const SX_ICON = { display: 'flex', '& svg': { fontSize: 24 } }
+const SX_INFO_BOX = { bgcolor: 'rgba(255,255,255,0.05)', borderRadius: 1.5, px: 1.5, py: 1 }
+const SX_INFO_LABEL = { fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700 }
+const SX_INFO_VALUE = { fontWeight: 800, fontSize: '1.15rem', lineHeight: 1.2 }
+const SX_ROOT = { height: '100%', display: 'flex', flexDirection: 'column', p: 1, gap: 1, overflow: 'hidden' }
+const SX_TOPBAR = { flexShrink: 0, height: 24 }
+const SX_BOTTOMSTRIP = { flexShrink: 0, display: 'flex', gap: 1.5, height: 128 }
+
+
+// ---- Hot-path components, built from plain DOM instead of MUI ------------------------
+//
+// MUI routes every component through Emotion, which serialises its style object into CSS
+// and injects a class on each render. That is fine for a settings dialog and expensive
+// for an instrument panel that repaints ten times a second: a CPU profile put ~75% of the
+// renderer inside React/Emotion, with no loop or leak to blame — the work was simply the
+// styling engine running over and over.
+//
+// These three components (a card, a tile and a stat) account for most of the panel's
+// elements, so they are plain divs with frozen style objects. React writes those straight
+// to node.style with no CSS generation at all. Everything outside the hot path keeps
+// using MUI, where the ergonomics are worth more than the microseconds.
+const ST_PAPER = {
+  backgroundColor: GAUGE_BG, borderRadius: 4, minHeight: 0,
+  boxShadow: '0 2px 1px -1px rgba(0,0,0,0.2), 0 1px 1px 0 rgba(0,0,0,0.14), 0 1px 3px 0 rgba(0,0,0,0.12)',
+}
+const ST_GAUGECARD = { ...ST_PAPER, padding: 10, display: 'flex', alignItems: 'center', justifyContent: 'center' }
+const ST_GAUGEINNER = { width: '100%', height: '100%', minHeight: 0 }
+const ST_TILE = { ...ST_PAPER, padding: 14, display: 'flex', flexDirection: 'column', justifyContent: 'center', overflow: 'hidden' }
+const ST_NOWRAP = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }
+const ST_TILE_LABEL = { ...ST_NOWRAP, opacity: 0.55, fontSize: '0.78rem', letterSpacing: 1.5, fontWeight: 700 }
+const ST_TILE_HEAD = { display: 'flex', alignItems: 'center', width: '100%' }
+const ST_TILE_VALROW = { display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0 }
+const ST_TILE_UNIT = { opacity: 0.6, fontSize: '1rem', fontWeight: 600 }
+const ST_TILE_SUB = { ...ST_NOWRAP, opacity: 0.5, fontSize: '0.78rem' }
+const ST_ICON = { display: 'flex', marginLeft: 'auto' }
+const ST_INFO = { backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 12, padding: '8px 12px' }
+const ST_INFO_LABEL = { fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700 }
+const ST_INFO_VALUE = { fontWeight: 800, fontSize: '1.15rem', lineHeight: 1.2 }
+
 const SVC = `http://${location.hostname}:8082`
 const M3S_TO_GPH = 951019.39 // m³/s → US gallons/hour
 
 // Poll the accelerometer attitude from the stereo-service — ICM20948 when present,
 // ADXL345 otherwise; the payload's `source` says which. Always live (not demo), so the
 // physical sensor can be tilt-tested regardless of the demo toggle.
-function useAttitude() {
+function useAttitude(active = true) {
   const [att, setAtt] = useState(null)
   useEffect(() => {
+    if (!active) return undefined
     let alive = true
     const poll = () => fetch(`${SVC}/api/imu`).then((r) => r.json())
       .then((d) => { if (alive) setAtt(d && typeof d === 'object' ? d : null) }).catch(() => {})
     poll(); const t = setInterval(poll, 200)
     return () => { alive = false; clearInterval(t) }
-  }, [])
+  }, [active])
   return att
 }
 
@@ -129,8 +183,13 @@ function useDemoValues(active) {
         'navigation.position': { value: { latitude: 27.9506 + 0.006 * Math.sin(t / 4), longitude: -82.4572 + 0.006 * Math.cos(t / 4) } },
       }
       if (phase === 1) m['notifications.propulsion.main.oil'] = { value: { state: 'warn', message: 'Low oil pressure' } }
+      // Round to display precision before it reaches the gauges (see quantise note).
+      for (const k of Object.keys(m)) {
+        const v = m[k] && m[k].value
+        if (typeof v === 'number') m[k] = { ...m[k], value: Math.round(v * 1000) / 1000 }
+      }
       setVals(m)
-      timer = setTimeout(tick, 200)
+      timer = setTimeout(tick, 400)   // 2.5Hz is plenty for a dockside demo
     }
     tick()
     return () => clearTimeout(timer)
@@ -188,10 +247,10 @@ function EngineStatusBadge({ status, text, color }) {
 // Small labeled readout used in the engine-detail popup.
 function InfoStat({ label, value }) {
   return (
-    <Box sx={{ bgcolor: 'rgba(255,255,255,0.05)', borderRadius: 1.5, px: 1.5, py: 1 }}>
-      <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700 }}>{label}</Typography>
-      <Typography sx={{ fontWeight: 800, fontSize: '1.15rem', lineHeight: 1.2 }}>{value}</Typography>
-    </Box>
+    <div style={ST_INFO}>
+      <div style={ST_INFO_LABEL}>{label}</div>
+      <div style={ST_INFO_VALUE}>{value}</div>
+    </div>
   )
 }
 // GPS popup (tap the POSITION tile). Built for a glance from the helm, not for study:
@@ -314,26 +373,44 @@ function GpsDetailDialog({ open, onClose, gps }) {
   )
 }
 function GaugeCard({ children, sx }) {
+  // Callers pass placement through `sx`; translate the keys actually used rather than
+  // dragging Emotion back in for them. Forward `flex` as well as grid placement — a card
+  // that silently ignored it stopped filling its column and sat squashed against the left
+  // edge with dead space beside it, which is not a mistake a style prop should be able to
+  // make quietly. minWidth/minHeight 0 lets a flex child actually shrink to its box.
+  const style = sx
+    ? { ...ST_GAUGECARD, gridColumn: sx.gridColumn, gridRow: sx.gridRow, flex: sx.flex, minWidth: 0, minHeight: 0 }
+    : ST_GAUGECARD
   return (
-    <Paper sx={{ p: 1.25, bgcolor: GAUGE_BG, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', ...sx }}>
-      <Box sx={{ width: '100%', height: '100%', minHeight: 0 }}>{children}</Box>
-    </Paper>
+    <div style={style}>
+      <div style={ST_GAUGEINNER}>{children}</div>
+    </div>
   )
 }
 function Tile({ label, value, unit, sub, accent, icon, children, sx, valueSize, center, onClick }) {
+  // Style objects are rebuilt only when the few dynamic bits change; the frozen bases
+  // above carry everything constant.
+  const style = {
+    ...ST_TILE,
+    alignItems: center ? 'center' : 'stretch',
+    textAlign: center ? 'center' : 'left',
+    ...(onClick ? { cursor: 'pointer' } : null),
+    ...(sx ? { flex: sx.flex, gridColumn: sx.gridColumn, gridRow: sx.gridRow } : null),
+  }
+  const valStyle = { ...ST_NOWRAP, fontWeight: 800, fontSize: valueSize || '2.1rem', lineHeight: 1.15, color: accent || '#fff' }
   return (
-    <Paper onClick={onClick} sx={{ p: 1.75, bgcolor: GAUGE_BG, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: center ? 'center' : 'stretch', textAlign: center ? 'center' : 'left', minHeight: 0, overflow: 'hidden', ...(onClick ? { cursor: 'pointer' } : null), ...sx }}>
-      <Stack direction="row" alignItems="center" justifyContent={center ? 'center' : 'space-between'} sx={{ width: '100%' }}>
-        <Typography noWrap sx={{ opacity: 0.55, fontSize: '0.78rem', letterSpacing: 1.5, fontWeight: 700 }}>{label}</Typography>
-        {icon ? <Box sx={{ color: accent || 'text.secondary', display: 'flex', '& svg': { fontSize: 24 } }}>{icon}</Box> : null}
-      </Stack>
-      <Stack direction="row" alignItems="baseline" justifyContent={center ? 'center' : 'flex-start'} spacing={0.75} sx={{ minWidth: 0 }}>
-        <Typography noWrap sx={{ fontWeight: 800, fontSize: valueSize || '2.1rem', lineHeight: 1.15, color: accent || 'text.primary' }}>{value}</Typography>
-        {unit ? <Typography sx={{ opacity: 0.6, fontSize: '1rem', fontWeight: 600 }}>{unit}</Typography> : null}
-      </Stack>
-      {sub ? <Typography noWrap sx={{ opacity: 0.5, fontSize: '0.78rem' }}>{sub}</Typography> : null}
+    <div style={style} onClick={onClick}>
+      <div style={center ? { ...ST_TILE_HEAD, justifyContent: 'center' } : ST_TILE_HEAD}>
+        <div style={ST_TILE_LABEL}>{label}</div>
+        {icon ? <div style={accent ? { ...ST_ICON, color: accent } : ST_ICON}>{icon}</div> : null}
+      </div>
+      <div style={center ? { ...ST_TILE_VALROW, justifyContent: 'center' } : ST_TILE_VALROW}>
+        <div style={valStyle}>{value}</div>
+        {unit ? <div style={ST_TILE_UNIT}>{unit}</div> : null}
+      </div>
+      {sub ? <div style={ST_TILE_SUB}>{sub}</div> : null}
       {children}
-    </Paper>
+    </div>
   )
 }
 // AMBIENT: shows every temperature source — SHT41 and HTU31D (both with humidity),
@@ -479,7 +556,7 @@ function BatteryTile({ v, a, hist }) {
   )
 }
 
-export default function Instruments() {
+export default function Instruments({ active = true }) {
   const [demo] = useDemo()   // set in Settings → Config; shared via localStorage
   const [tempOpen, setTempOpen] = useState(false)
   const [gpsOpen, setGpsOpen] = useState(false)
@@ -494,7 +571,7 @@ export default function Instruments() {
     try { if (v == null) localStorage.removeItem('helm.bezel'); else localStorage.setItem('helm.bezel', String(v)) } catch (e) { /* private mode */ }
   }
   const live = useSignalKData()
-  const demoVals = useDemoValues(demo)
+  const demoVals = useDemoValues(demo && active)
   const connected = demo ? true : live.connected
   const values = demo ? demoVals : live.values
 
@@ -544,7 +621,7 @@ export default function Instruments() {
   })()
   const pos = gpsFix ? gpsPos : skValue(values, 'navigation.position')
 
-  const attitude = useAttitude()
+  const attitude = useAttitude(active)
   const sys = useSystem()
   const gpsDiag = useGps()
   const cpuT = sys && typeof sys.temp === 'number' && sys.temp > 0 ? sys.temp : null
@@ -575,8 +652,8 @@ export default function Instruments() {
   const stMap = { ok: ['OK', GAUGE_COLORS.GREEN], warn: ['CHECK', GAUGE_COLORS.AMBER], alarm: ['ALARM', GAUGE_COLORS.RED], unknown: ['—', undefined] }
   const [statusText, statusColor] = stMap[engStatus.level] || stMap.unknown
   return (
-    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', p: 1, gap: 1, overflow: 'hidden' }}>
-      <Stack direction="row" alignItems="center" spacing={1} sx={{ flexShrink: 0, height: 24 }}>
+    <Box sx={SX_ROOT}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={SX_TOPBAR}>
         {/* Status only — the demo switch itself lives in Settings → Config now, so a
             stray tap on a moving boat can't swap the panel to synthetic data. */}
         <Chip size="small" color={demo ? 'info' : connected ? 'success' : 'default'} variant="filled" label={demo ? 'demo' : connected ? 'live' : 'offline'} sx={{ height: 20 }} />
@@ -606,7 +683,7 @@ export default function Instruments() {
       </Box>
 
       {/* Bottom strip */}
-      <Box sx={{ flexShrink: 0, display: 'flex', gap: 1.5, height: 128 }}>
+      <Box sx={SX_BOTTOMSTRIP}>
         <BatteryTile v={battV} a={battA} hist={battHist} />
         <FuelFlowTile rpm={rpm} gph={fuelRate} />
         {fuelLevel != null ? <Box sx={{ flex: 2.0, display: 'flex' }}><FuelLevelTile pct={fuelLevel} /></Box> : null}
