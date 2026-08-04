@@ -52,3 +52,27 @@ otg_mode=1
 # This overlay enables spi0 itself, so dtparam=spi=on is not needed.
 dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=25
 
+# 400 kHz instead of the 100 kHz default. Every device on this bus (MCP9808, HTU31D,
+# SHT41, ICM20948, ADXL345, MCP23017) and the LTC4307 buffer are rated for it, and it
+# cuts a byte read from ~300us to ~75us. That matters for the rotary encoder: polling it
+# was sampling slower than the knob generates edges, which showed up as missed
+# quadrature states on fast spins.
+dtparam=i2c_arm=on,i2c_arm_baudrate=400000
+
+# --- Header UART on GPIO14/15 (/dev/serial0 -> ttyS0, mini UART) ---
+# Left enabled, but NOT used by the GPS: GPIO15/pin10 is clamped low by something on the
+# Pi side of the header, so no receiver can frame data there (measured: the pad drives
+# both ways as an output, but as an input it stays low even with the internal pull-up,
+# with nothing attached and with the hat's other candidates removed).
+# PPS on GPIO23 was for the old ATGM336H GPS, which has been removed; the overlay is
+# gone so GPIO23 is a free general-purpose pin again.
+enable_uart=1
+
+# --- GPS (u-blox M10) on uart5: GPIO12/pin32 = TX, GPIO13/pin33 = RX ---
+# A real PL011 (fe201a00.serial), not the mini UART, and on pins that tested clean.
+# The tty number the kernel hands out is not stable (Bluetooth's PL011 already takes
+# ttyAMA1), so udev gives it the fixed name /dev/gps — see pi/etc/udev/rules.d/99-gps.rules.
+dtoverlay=uart5
+# --- Cooling fan enable on GPIO18/pin12 (driven high at boot = on; PWM controller may modulate) ---
+gpio=18=op,dh
+

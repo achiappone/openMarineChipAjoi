@@ -1,1 +1,60 @@
-{"interfaces": {},"ssl": false,"pipedProviders": [],"security": {"strategy": "./tokensecurity"}}
+{
+  "interfaces": {},
+  "ssl": false,
+  "pipedProviders": [
+    {
+      "id": "AIS-SDR",
+      "enabled": true,
+      "pipeElements": [
+        {
+          "type": "providers/simple",
+          "options": {
+            "logging": false,
+            "type": "NMEA0183",
+            "subOptions": {
+              "type": "udp",
+              "port": "10110"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "GPS",
+      "enabled": true,
+      "pipeElements": [
+        {
+          "type": "providers/simple",
+          "options": {
+            "logging": false,
+            "type": "NMEA0183",
+            "subOptions": {
+              "type": "udp",
+              "port": "10111"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "PHONE-GPS",
+      "enabled": true,
+      "pipeElements": [
+        {
+          "type": "providers/simple",
+          "options": {
+            "logging": false,
+            "type": "NMEA0183",
+            "subOptions": {
+              "type": "udp",
+              "port": "10112"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "security": {
+    "strategy": "./tokensecurity"
+  }
+}

@@ -6,12 +6,16 @@ import ThermostatIcon from '@mui/icons-material/Thermostat'
 import MemoryIcon from '@mui/icons-material/Memory'
 import WaterDropIcon from '@mui/icons-material/WaterDrop'
 import useSignalKData, { skCelsius, skValue, skDeg, skMeters, skKnots, M_TO_FT } from '../hooks/useSignalKData'
-import { ArcGauge, TachGauge, CompassGauge, StatusGauge, InclinometerGauge, Sparkline, GAUGE_COLORS, GAUGE_BG } from './gauges'
+import NmeaConsole from '../components/NmeaConsole'
+import { gpsSummary } from '../lib/nmea'
+import { useDemo } from '../lib/demoMode'
+import { ArcGauge, TachGauge, CompassGauge, StatusGauge, InclinometerGauge, AttitudeCompassGauge, Sparkline, GAUGE_COLORS, GAUGE_BG } from './gauges'
 
 const SVC = `http://${location.hostname}:8082`
 const M3S_TO_GPH = 951019.39 // m³/s → US gallons/hour
 
-// Poll the ADXL345 attitude from the stereo-service. Always live (not demo), so the
+// Poll the accelerometer attitude from the stereo-service — ICM20948 when present,
+// ADXL345 otherwise; the payload's `source` says which. Always live (not demo), so the
 // physical sensor can be tilt-tested regardless of the demo toggle.
 function useAttitude() {
   const [att, setAtt] = useState(null)
@@ -38,6 +42,20 @@ function useSystem() {
     return () => { alive = false; clearInterval(t) }
   }, [])
   return sys
+}
+// Poll the GPS receiver's own state from the stereo-service: acquisition, the UBX module
+// identity (model/firmware/protocol/constellations) and the RF front end (AGC/noise/
+// jamming). Real hardware, so always live regardless of demo mode.
+function useGps() {
+  const [gps, setGps] = useState(null)
+  useEffect(() => {
+    let alive = true
+    const poll = () => fetch(`${SVC}/api/gps`).then((r) => r.json())
+      .then((d) => { if (alive) setGps(d && typeof d === 'object' ? d : null) }).catch(() => {})
+    poll(); const t = setInterval(poll, 2000)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+  return gps
 }
 const CARD16 = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
 const cardinal = (d) => (d == null ? '' : CARD16[Math.round(d / 22.5) % 16])
@@ -176,6 +194,125 @@ function InfoStat({ label, value }) {
     </Box>
   )
 }
+// GPS popup (tap the POSITION tile). Built for a glance from the helm, not for study:
+// one big verdict, three numbers, and the satellite bars. Diagnostics — RF front end and
+// the decoded sentence stream — sit behind a toggle, because they answer "why is it
+// broken", which is a different moment from "are we good".
+const AGC_PINNED_PCT = 15
+// HDOP is satellite geometry, not signal quality: position error ≈ HDOP × ranging error.
+// 99.99 is not a terrible score — it's the receiver's "not computed" sentinel, emitted
+// whenever there's no fix to evaluate. Showing it as a number invites the reader to
+// treat a null as a measurement, so we don't.
+function hdopText(gps) {
+  const h = gps?.hdop
+  if (h == null || h >= 99 || !((gps?.fix || 0) >= 1)) return '—'
+  const quality = h < 1 ? 'ideal' : h < 2 ? 'excellent' : h < 5 ? 'good' : h < 10 ? 'moderate' : 'poor'
+  return `${h} · ${quality}`
+}
+function GpsDetailDialog({ open, onClose, gps }) {
+  const [details, setDetails] = useState(false)
+  const rf = gps?.rf
+  const pct = rf && rf.agc != null ? Math.round((rf.agc / (rf.agcMax || 8191)) * 100) : null
+  const agcLow = pct != null && pct <= AGC_PINNED_PCT
+  const jamBad = rf && (rf.jam === 'warning' || rf.jam === 'critical')
+  const rfColor = agcLow || jamBad ? GAUGE_COLORS.RED : GAUGE_COLORS.GREEN
+  const sats = (gps?.sats || []).filter((s) => s.snr)
+  const fixed = (gps?.fix || 0) >= 1
+  const summary = gpsSummary(gps)
+
+  // The verdict, in one word, colour-coded. This is the whole point of the popup.
+  const verdict = !gps?.alive ? { text: 'NO DATA', color: GAUGE_COLORS.RED }
+    : fixed ? { text: (gps.fix >= 2 ? '3D FIX' : 'FIX'), color: GAUGE_COLORS.GREEN }
+      : gps.satsInView > 0 ? { text: 'SEARCHING', color: GAUGE_COLORS.AMBER }
+        : { text: 'NO SIGNAL', color: GAUGE_COLORS.AMBER }
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth={false}
+      PaperProps={{ sx: { bgcolor: GAUGE_BG, p: 2, width: '82vw', maxWidth: '82vw', m: 0 } }}>
+      {/* Verdict first, big enough to read standing back from the helm. */}
+      <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 1.5 }}>
+        <Typography sx={{ fontWeight: 900, fontSize: '2.6rem', lineHeight: 1, color: verdict.color, letterSpacing: 1 }}>
+          {verdict.text}
+        </Typography>
+        <Typography sx={{ flex: 1, fontSize: '0.95rem', opacity: 0.8 }}>{summary.text}</Typography>
+      </Stack>
+
+      {/* Coarse Wi-Fi estimate, stated as what it is. Never merged with fix data. */}
+      {!fixed && gps?.approx ? (
+        <Typography sx={{ mb: 1.5, fontSize: '0.9rem', color: GAUGE_COLORS.AMBER }}>
+          ≈ {Math.abs(gps.approx.lat).toFixed(4)}° {gps.approx.lat >= 0 ? 'N' : 'S'}  {Math.abs(gps.approx.lon).toFixed(4)}° {gps.approx.lon >= 0 ? 'E' : 'W'}
+          <Box component="span" sx={{ opacity: 0.7 }}>
+            {' '}— Wi-Fi estimate ±{Math.round(gps.approx.accuracy || 0)} m, {gps.approx.ageS}s old. Position only, no speed or course. Not a navigation fix.
+          </Box>
+        </Typography>
+      ) : null}
+
+      {/* The three numbers that matter underway. */}
+      <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1.5 }}>
+        {[['SATELLITES', gps?.satsInView ?? '—'], ['USED FOR FIX', gps?.satsUsed ?? '—'],
+          ['ACCURACY', hdopText(gps)]].map(([l, v]) => (
+          <Box key={l} sx={{ bgcolor: 'rgba(255,255,255,0.05)', borderRadius: 1.5, px: 1.75, py: 1.25 }}>
+            <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700 }}>{l}</Typography>
+            <Typography sx={{ fontWeight: 800, fontSize: '2rem', lineHeight: 1.15 }}>{v}</Typography>
+          </Box>
+        ))}
+      </Box>
+
+      {/* Signal strength: the fastest read on whether things are improving. */}
+      {sats.length ? (
+        <Box sx={{ display: 'flex', alignItems: 'flex-end', gap: 0.5, height: 88, mt: 1.75 }}>
+          {sats.sort((a, b) => b.snr - a.snr).map((s, i) => (
+            <Box key={i} sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
+              <Typography sx={{ fontSize: '0.6rem', opacity: 0.7 }}>{s.snr}</Typography>
+              <Box sx={{ width: '80%', height: `${Math.min(100, (s.snr / 50) * 100)}%`, minHeight: 2, borderRadius: 0.5,
+                bgcolor: s.snr >= 30 ? GAUGE_COLORS.GREEN : s.snr >= 20 ? GAUGE_COLORS.AMBER : GAUGE_COLORS.RED }} />
+              <Typography sx={{ fontSize: '0.6rem', opacity: 0.6, mt: 0.25 }}>{s.id}</Typography>
+            </Box>
+          ))}
+        </Box>
+      ) : (
+        <Typography sx={{ mt: 1.75, fontSize: '0.9rem', opacity: 0.5 }}>
+          No satellite signal to show yet — bars appear here as they're heard.
+        </Typography>
+      )}
+
+      {/* Gain stays on the glance view: it's the number that moves when the antenna
+          moves, so it's the live feedback while hunting for a better position. */}
+      <Stack direction="row" spacing={2} alignItems="center" sx={{ mt: 1.75 }}>
+        {rf && rf.agc != null ? (
+          <Stack direction="row" spacing={1.5} alignItems="center" sx={{ minWidth: 320 }}>
+            <Typography sx={{ fontSize: '0.75rem', opacity: 0.6, letterSpacing: 1, fontWeight: 700 }}>GAIN</Typography>
+            <Typography sx={{ fontWeight: 800, fontSize: '1.9rem', lineHeight: 1, color: rfColor }}>
+              {rf.agc}<Box component="span" sx={{ opacity: 0.6, fontSize: '1.1rem', fontWeight: 600 }}> · {pct}%</Box>
+            </Typography>
+            <Box sx={{ flex: 1, height: 9, borderRadius: 4, bgcolor: 'rgba(255,255,255,0.12)', overflow: 'hidden', minWidth: 110 }}>
+              <Box sx={{ width: `${Math.max(2, pct)}%`, height: '100%', bgcolor: rfColor }} />
+            </Box>
+          </Stack>
+        ) : null}
+        {agcLow && !gps?.satsInView ? (
+          <Typography sx={{ fontSize: '0.8rem', color: '#ff8f85' }}>at minimum — front end saturated or idle</Typography>
+        ) : null}
+        <Box sx={{ flex: 1 }} />
+        <Chip size="small" label={details ? 'Hide RF detail' : 'RF detail'} onClick={() => setDetails(!details)}
+          variant={details ? 'filled' : 'outlined'} sx={{ cursor: 'pointer' }} />
+      </Stack>
+
+      {details && rf ? (
+        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1, mt: 1.25 }}>
+          <InfoStat label="NOISE" value={rf.noise ?? '—'} />
+          <InfoStat label="JAMMING" value={`${rf.jam || '—'}${rf.jamInd != null ? ` ${rf.jamInd}` : ''}`} />
+          <InfoStat label="ANTENNA" value={rf.ant || '—'} />
+        </Box>
+      ) : null}
+
+      {/* The console stays — reading the receiver's own words is how you tell a quiet
+          receiver from a broken link. */}
+      <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700, mt: 1.75, mb: 0.5 }}>WHAT THE RECEIVER IS SAYING</Typography>
+      <NmeaConsole lines={gps?.raw} maxHeight={220} />
+    </Dialog>
+  )
+}
 function GaugeCard({ children, sx }) {
   return (
     <Paper sx={{ p: 1.25, bgcolor: GAUGE_BG, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', ...sx }}>
@@ -183,9 +320,9 @@ function GaugeCard({ children, sx }) {
     </Paper>
   )
 }
-function Tile({ label, value, unit, sub, accent, icon, children, sx, valueSize, center }) {
+function Tile({ label, value, unit, sub, accent, icon, children, sx, valueSize, center, onClick }) {
   return (
-    <Paper sx={{ p: 1.75, bgcolor: GAUGE_BG, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: center ? 'center' : 'stretch', textAlign: center ? 'center' : 'left', minHeight: 0, overflow: 'hidden', ...sx }}>
+    <Paper onClick={onClick} sx={{ p: 1.75, bgcolor: GAUGE_BG, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: center ? 'center' : 'stretch', textAlign: center ? 'center' : 'left', minHeight: 0, overflow: 'hidden', ...(onClick ? { cursor: 'pointer' } : null), ...sx }}>
       <Stack direction="row" alignItems="center" justifyContent={center ? 'center' : 'space-between'} sx={{ width: '100%' }}>
         <Typography noWrap sx={{ opacity: 0.55, fontSize: '0.78rem', letterSpacing: 1.5, fontWeight: 700 }}>{label}</Typography>
         {icon ? <Box sx={{ color: accent || 'text.secondary', display: 'flex', '& svg': { fontSize: 24 } }}>{icon}</Box> : null}
@@ -199,10 +336,12 @@ function Tile({ label, value, unit, sub, accent, icon, children, sx, valueSize, 
     </Paper>
   )
 }
-// AMBIENT: shows all three temperature sources — HTU31D (with humidity), MCP9808,
-// and the Pi SoC (CPU) — each labeled. Temps in °F except the CPU (°C by convention).
-function AmbientTile({ htuF, mcpF, cpuT, humidity }) {
-  const primary = htuF != null ? htuF : mcpF
+// AMBIENT: shows every temperature source — SHT41 and HTU31D (both with humidity),
+// MCP9808, and the Pi SoC (CPU) — each labeled. Temps in °F except the CPU (°C by
+// convention). The SHT41 leads: it's the tightest-tolerance part of the three, so it
+// drives the tile's icon/accent colour and its humidity is the one shown.
+function AmbientTile({ shtF, htuF, mcpF, cpuT, shtHumidity, humidity }) {
+  const primary = shtF != null ? shtF : htuF != null ? htuF : mcpF
   const icon = primary == null ? <ThermostatIcon /> : primary < 50 ? <AcUnitIcon /> : primary > 77 ? <WbSunnyIcon /> : <ThermostatIcon />
   const accent = primary == null ? 'text.secondary' : primary < 50 ? GAUGE_COLORS.BLUE : primary > 77 ? GAUGE_COLORS.AMBER : 'text.secondary'
   const lbl = { fontSize: '0.64rem', fontWeight: 700, letterSpacing: 0.5, opacity: 0.5, width: 30 }
@@ -214,11 +353,22 @@ function AmbientTile({ htuF, mcpF, cpuT, humidity }) {
         <Box sx={{ color: accent, display: 'flex', '& svg': { fontSize: 22 } }}>{icon}</Box>
       </Stack>
       <Stack spacing={0.15}>
+        {shtF != null && (
+          <Stack direction="row" alignItems="baseline" spacing={0.75}>
+            <Typography sx={lbl}>SHT</Typography>
+            <Typography sx={{ ...val, color: accent === 'text.secondary' ? 'text.primary' : accent }}>{Math.round(shtF)}°F</Typography>
+            {shtHumidity != null && (
+              <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3, fontSize: '1.05rem', fontWeight: 700, opacity: 0.9, ml: 0.5 }}>
+                <WaterDropIcon sx={{ fontSize: 17, color: GAUGE_COLORS.BLUE }} />{Math.round(shtHumidity)}%
+              </Box>
+            )}
+          </Stack>
+        )}
         {htuF != null && (
           <Stack direction="row" alignItems="baseline" spacing={0.75}>
             <Typography sx={lbl}>HTU</Typography>
-            <Typography sx={{ ...val, color: accent === 'text.secondary' ? 'text.primary' : accent }}>{Math.round(htuF)}°F</Typography>
-            {humidity != null && (
+            <Typography sx={{ ...val, color: shtF != null ? 'text.primary' : accent === 'text.secondary' ? 'text.primary' : accent }}>{Math.round(htuF)}°F</Typography>
+            {humidity != null && shtHumidity == null && (
               <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3, fontSize: '1.05rem', fontWeight: 700, opacity: 0.9, ml: 0.5 }}>
                 <WaterDropIcon sx={{ fontSize: 17, color: GAUGE_COLORS.BLUE }} />{Math.round(humidity)}%
               </Box>
@@ -330,8 +480,19 @@ function BatteryTile({ v, a, hist }) {
 }
 
 export default function Instruments() {
-  const [demo, setDemo] = useState(true)
+  const [demo] = useDemo()   // set in Settings → Config; shared via localStorage
   const [tempOpen, setTempOpen] = useState(false)
+  const [gpsOpen, setGpsOpen] = useState(false)
+  // Compass bezel mark — survives a reload, because a course you set an hour ago is
+  // still the course you're steering.
+  const [bezel, setBezel] = useState(() => {
+    const v = Number(localStorage.getItem('helm.bezel'))
+    return isFinite(v) && localStorage.getItem('helm.bezel') != null ? v : null
+  })
+  const setBezelPersist = (v) => {
+    setBezel(v)
+    try { if (v == null) localStorage.removeItem('helm.bezel'); else localStorage.setItem('helm.bezel', String(v)) } catch (e) { /* private mode */ }
+  }
   const live = useSignalKData()
   const demoVals = useDemoValues(demo)
   const connected = demo ? true : live.connected
@@ -385,12 +546,15 @@ export default function Instruments() {
 
   const attitude = useAttitude()
   const sys = useSystem()
+  const gpsDiag = useGps()
   const cpuT = sys && typeof sys.temp === 'number' && sys.temp > 0 ? sys.temp : null
   // I2C ambient sensors via imu.py (real sensors win over SignalK air temp + demo).
-  // HTU31D gives temp + humidity; MCP9808 is a temp-only fallback.
+  // SHT41 and HTU31D both give temp + humidity; MCP9808 is a temp-only fallback.
   const mcpT = attitude && typeof attitude.tempC === 'number' ? attitude.tempC : null
   const htuT = attitude && typeof attitude.htuC === 'number' ? attitude.htuC : null
   const humidity = attitude && typeof attitude.humidity === 'number' ? attitude.humidity : null
+  const shtT = attitude && typeof attitude.shtC === 'number' ? attitude.shtC : null
+  const shtHumidity = attitude && typeof attitude.shtHumidity === 'number' ? attitude.shtHumidity : null
   const ambC = htuT != null ? htuT : (mcpT != null ? mcpT : airT)
   const ambF = toF(ambC)
   const trip = useTrip(pos, sog)
@@ -399,18 +563,24 @@ export default function Instruments() {
   const fuelHist = useHistory(fuelRate)
 
   // POSITION always reflects the real GPS: coordinates when fixed, else acquiring status.
+  // With no fix, fall back to the coarse Wi-Fi estimate if one exists — prefixed with
+  // "≈" and shown in amber, so it can never be read as a real fix.
+  const approx = gpsDiag?.approx
   const posStr = gpsFix
     ? `${Math.abs(gpsPos.latitude).toFixed(5)}° ${gpsPos.latitude >= 0 ? 'N' : 'S'}   ${Math.abs(gpsPos.longitude).toFixed(5)}° ${gpsPos.longitude >= 0 ? 'E' : 'W'}`
-    : `GPS acquiring${gpsSats != null ? ` · ${gpsSats} sat` : '…'}`
+    : approx
+      ? `≈ ${Math.abs(approx.lat).toFixed(4)}° ${approx.lat >= 0 ? 'N' : 'S'}   ${Math.abs(approx.lon).toFixed(4)}° ${approx.lon >= 0 ? 'E' : 'W'}`
+      : `GPS acquiring${gpsSats != null ? ` · ${gpsSats} sat` : '…'}`
 
   const stMap = { ok: ['OK', GAUGE_COLORS.GREEN], warn: ['CHECK', GAUGE_COLORS.AMBER], alarm: ['ALARM', GAUGE_COLORS.RED], unknown: ['—', undefined] }
   const [statusText, statusColor] = stMap[engStatus.level] || stMap.unknown
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', p: 1, gap: 1, overflow: 'hidden' }}>
       <Stack direction="row" alignItems="center" spacing={1} sx={{ flexShrink: 0, height: 24 }}>
+        {/* Status only — the demo switch itself lives in Settings → Config now, so a
+            stray tap on a moving boat can't swap the panel to synthetic data. */}
         <Chip size="small" color={demo ? 'info' : connected ? 'success' : 'default'} variant="filled" label={demo ? 'demo' : connected ? 'live' : 'offline'} sx={{ height: 20 }} />
         <Box sx={{ flex: 1 }} />
-        <Chip size="small" clickable onClick={() => setDemo((d) => !d)} color={demo ? 'primary' : 'default'} variant={demo ? 'filled' : 'outlined'} label={demo ? 'Demo ON — tap to stop' : 'Demo'} sx={{ height: 20 }} />
       </Stack>
 
       {/* Layout: big SPEED on the left, RPM tach centre (full height), COMPASS
@@ -424,8 +594,15 @@ export default function Instruments() {
           <EngineStatusBadge status={engStatus} text={statusText} color={statusColor} />
         </Box>
 
-        <GaugeCard sx={{ gridColumn: 3, gridRow: 1 }}><CompassGauge heading={heading} cog={cog} /></GaugeCard>
-        <GaugeCard sx={{ gridColumn: 3, gridRow: 2 }}><InclinometerGauge roll={attitude && typeof attitude.roll === 'number' ? -attitude.roll : null} pitch={attitude && typeof attitude.pitch === 'number' ? attitude.pitch : null} /></GaugeCard>
+        {/* Heading, heel and trim are one sensor answering one question — shown on one
+            dial, which also gives the horizon far more room than two stacked gauges. */}
+        <GaugeCard sx={{ gridColumn: 3, gridRow: '1 / 3' }}>
+          <AttitudeCompassGauge
+            heading={heading} cog={cog}
+            roll={attitude && typeof attitude.roll === 'number' ? -attitude.roll : null}
+            pitch={attitude && typeof attitude.pitch === 'number' ? attitude.pitch : null}
+            bezel={bezel} onBezel={setBezelPersist} />
+        </GaugeCard>
       </Box>
 
       {/* Bottom strip */}
@@ -434,9 +611,15 @@ export default function Instruments() {
         <FuelFlowTile rpm={rpm} gph={fuelRate} />
         {fuelLevel != null ? <Box sx={{ flex: 2.0, display: 'flex' }}><FuelLevelTile pct={fuelLevel} /></Box> : null}
         <Tile label="DEPTH" value={depth == null ? '—' : fmt(depth * M_TO_FT, 0)} unit={depth == null ? '' : 'ft'} valueSize="2.7rem" sx={{ flex: 0.9 }} accent={GAUGE_COLORS.BLUE} center />
-        <AmbientTile htuF={toF(htuT)} mcpF={toF(mcpT)} cpuT={cpuT} humidity={humidity} />
+        <AmbientTile shtF={toF(shtT)} htuF={toF(htuT)} mcpF={toF(mcpT)} cpuT={cpuT} shtHumidity={shtHumidity} humidity={humidity} />
         <Tile label="TRIP" value={trip.distance ? trip.distance.toFixed(1) : '0.0'} unit="nm" sx={{ flex: 0.9 }} accent={GAUGE_COLORS.BLUE} />
-        <Tile label="POSITION" value={posStr} valueSize={gpsFix ? '1.35rem' : '1.15rem'} sx={{ flex: 1.9 }} accent={gpsFix ? GAUGE_COLORS.GREEN : GAUGE_COLORS.AMBER} />
+        {/* Tap POSITION → GPS detail (module identity, RF front end, satellites, raw NMEA) */}
+        <Tile label="POSITION" value={posStr} valueSize={gpsFix ? '1.35rem' : '1.15rem'} sx={{ flex: 1.9 }}
+          accent={gpsFix ? GAUGE_COLORS.GREEN : GAUGE_COLORS.AMBER}
+          onClick={() => setGpsOpen(true)}
+          sub={!gpsFix && approx
+            ? `Wi-Fi approx ±${Math.round(approx.accuracy || 0)} m — not a fix`
+            : gpsDiag?.module?.model ? `${gpsDiag.module.model} · ${gpsDiag.satsInView ?? 0} sats · tap` : 'tap for GPS detail'} />
       </Box>
 
       {/* Tap the temp under the tach → engine detail popup (gauge + key readouts) */}
@@ -456,6 +639,8 @@ export default function Instruments() {
           <InfoStat label="GEAR" value={gear || '—'} />
         </Box>
       </Dialog>
+
+      <GpsDetailDialog open={gpsOpen} onClose={() => setGpsOpen(false)} gps={gpsDiag} />
     </Box>
   )
 }

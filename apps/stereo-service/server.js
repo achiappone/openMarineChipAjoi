@@ -156,7 +156,18 @@ function clearSpectrum() { spectrum = new Array(NBANDS).fill(0); samples = [] }
 // ---- FM pipeline: rtl_fm (-M fm MPX) -> tee -> { redsea (RDS), sox (deemph+resample) -> aplay } ----
 let rtlProc = null, aplayProc = null, soxProc = null, redseaProc = null, restartTimer = null, rdsBuf = ''
 
+let volTimer = null, volPending = false
 function applyVolume() {
+  // Coalesced: rapid changes (a knob spin) collapse into one spawn per ~60ms window,
+  // always with the newest value. Spawning amixer per detent backed up the queue and
+  // made the volume lurch to the final position seconds later.
+  volPending = true
+  if (volTimer) return
+  volTimer = setTimeout(() => { volTimer = null; if (volPending) { volPending = false; applyVolumeNow() } }, 60)
+  applyVolumeNow()
+}
+function applyVolumeNow() {
+  volPending = false
   let pct = 0
   if (!state.muted && state.volume > 0) {
     pct = Math.round(VOL_FLOOR_PCT + ((state.volume - 1) / (30 - 1)) * (100 - VOL_FLOOR_PCT))
@@ -209,10 +220,15 @@ function parseRds(d) {
 }
 
 function killPipeline() {
-  for (const p of [rtlProc, redseaProc, soxProc, aplayProc]) { try { if (p) p.kill('SIGTERM') } catch (e) {} }
+  // SIGKILL, not SIGTERM. sox blocks in read() as soon as rtl_fm goes away and only
+  // checks its termination flag after the read returns — which never happens — so a
+  // polite signal leaves it running forever. Every retune used to strand one, and a
+  // handful of them fighting over the audio device is what makes playback skip.
+  // There is nothing to flush in an audio pipeline, so a graceful stop buys nothing.
+  for (const p of [rtlProc, redseaProc, soxProc, aplayProc]) { try { if (p) p.kill('SIGKILL') } catch (e) {} }
   rtlProc = aplayProc = soxProc = redseaProc = null; rdsBuf = ''
   // backstop by exact process name (-x never self-matches the shell running it)
-  try { execSync('pkill -x rtl_fm; pkill -x redsea; pkill -x sox; pkill -x aplay; true', { stdio: 'ignore' }) } catch (e) {}
+  try { execSync('pkill -9 -x rtl_fm; pkill -9 -x redsea; pkill -9 -x sox; pkill -9 -x aplay; true', { stdio: 'ignore' }) } catch (e) {}
   clearSpectrum()
 }
 
@@ -241,7 +257,12 @@ function scheduleStart() {
       '-t', 'raw', '-r', String(RATE), '-e', 'signed', '-b', '16', '-c', '1', '-',
       ...deemp, 'lowpass', '16000', 'gain', '4'], { stdio: ['pipe', 'pipe', 'ignore'] })
     soxProc.stdin.on('error', () => {}); soxProc.on('error', () => {})
-    aplayProc = spawn('aplay', ['-q', '-r', String(RATE), '-f', 'S16_LE', '-t', 'raw', '-c', '1', '-D', AUDIO_DEV], { stdio: ['pipe', 'ignore', 'ignore'] })
+    aplayProc = spawn('aplay', ['-q', '-r', String(RATE), '-f', 'S16_LE', '-t', 'raw', '-c', '1',
+      // Ride out CPU spikes from the browser rather than underrunning. Volume is applied
+      // by the hardware mixer, so this costs nothing in control responsiveness.
+      '--buffer-time', String(Number(process.env.AUDIO_BUFFER_US || 250000)),
+      '--period-time', String(Number(process.env.AUDIO_PERIOD_US || 50000)),
+      '-D', AUDIO_DEV], { stdio: ['pipe', 'ignore', 'ignore'] })
     soxProc.stdout.pipe(aplayProc.stdin)
     soxProc.stdout.on('data', pushAudio) // FFT tap on clean 48k audio
     aplayProc.stdin.on('error', () => {}); aplayProc.on('error', () => {})
@@ -311,7 +332,7 @@ async function btScan() {
   if (btScanning) return
   btScanning = true
   try {
-    if (!state.bluetooth.name) {
+    {
       const am = /^s "([^"]*)"/m.exec(await execP(`busctl --system get-property org.bluez ${ADAPTER} org.bluez.Adapter1 Alias 2>/dev/null`))
       if (am) state.bluetooth.name = busUnescape(am[1])
     }
@@ -1097,6 +1118,190 @@ async function wifiScan() {
   return { networks: [...seen.values()].sort((a, b) => b.signal - a.signal) }
 }
 
+// ---- Wi-Fi positioning: a coarse fallback for when the GPS has no fix -------------
+// Looks up nearby access points by BSSID in a public geolocation database. Accuracy is
+// 20-150 m near shore and it returns nothing offshore where there are no APs, so it is
+// deliberately NOT published to SignalK as navigation.position — a coarse estimate that
+// looks authoritative would corrupt the plotter, the trip log and any anchor alarm.
+// It is used for exactly two things: showing an approximate position on screen while
+// acquiring, and seeding GPS startup aiding (where +/-100 m is far better than a static
+// home coordinate).
+//
+// Privacy: this sends the MAC addresses of nearby access points to a third party. It runs
+// only while there is no GPS fix, at most every WIFI_LOC_EVERY seconds. Set WIFI_LOC=0 to
+// disable entirely.
+const WIFI_LOC_ON = process.env.WIFI_LOC !== '0'
+const WIFI_LOC_URL = process.env.WIFI_LOC_URL || 'https://api.beacondb.net/v1/geolocate'
+const WIFI_LOC_EVERY = Number(process.env.WIFI_LOC_EVERY || 300) * 1000
+const WIFI_POS_FILE = `${__dirname}/wifipos.json`
+let wifiFix = null      // { lat, lon, accuracy, ts, aps }
+let wifiLastTry = 0
+let wifiLastError = null
+
+// Scan without --rescan: a forced rescan briefly drops the link this Pi is reachable on.
+// NetworkManager refreshes its cache on its own, which is plenty for a 5-minute cadence.
+async function wifiAccessPoints(allowRescan = true) {
+  let out = await execP('nmcli -t -f BSSID,SIGNAL device wifi list 2>/dev/null')
+  // A cached scan often holds only the connected AP, which is useless for triangulation.
+  // Force a rescan only in that case: it briefly interrupts wlan0, which matters when
+  // that link is a phone tether. The helm itself talks to localhost, so the display is
+  // unaffected either way. Rate-limited by the 5-minute caller cadence.
+  if (allowRescan && (out.match(/\n/g) || []).length < 3) {
+    // sudo is load-bearing: an unprivileged rescan is refused by polkit and fails
+    // silently, leaving the stale single-AP cache that made this look like a dead radio.
+    await execP('sudo nmcli device wifi rescan 2>/dev/null').catch(() => {})
+    await new Promise((r) => setTimeout(r, 5000))
+    out = await execP('nmcli -t -f BSSID,SIGNAL device wifi list 2>/dev/null')
+  }
+  const aps = []
+  for (const line of out.split('\n').filter(Boolean)) {
+    // nmcli escapes the MAC's colons as "\:" in terse output.
+    const m = line.match(/^((?:[0-9A-Fa-f]{2}\\?:){5}[0-9A-Fa-f]{2}):(\d+)\s*$/)
+    if (!m) continue
+    const mac = m[1].replace(/\\/g, '').toUpperCase()
+    if (/^00:00:00/.test(mac)) continue
+    // nmcli reports 0-100%; the geolocation API wants dBm.
+    const dbm = Math.round(Number(m[2]) / 2 - 100)
+    aps.push({ macAddress: mac, signalStrength: dbm })
+  }
+  return aps
+}
+
+async function wifiLocate() {
+  const aps = await wifiAccessPoints()
+  // Two is the practical minimum: one AP gives the provider nothing to triangulate with,
+  // and single-AP answers are wrong often enough to be dangerous on the water.
+  if (aps.length < 2) { wifiLastError = `only ${aps.length} access points visible`; return null }
+  const body = JSON.stringify({ considerIp: false, wifiAccessPoints: aps })
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 12000)
+    const r = await fetch(WIFI_LOC_URL, {
+      method: 'POST', signal: ctrl.signal, body,
+      // beaconDB asks clients to identify themselves rather than carry an API key.
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'openMarine-helm/1.0 (boat navigation fallback)' },
+    })
+    clearTimeout(t)
+    if (!r.ok) {
+      // In the MLS/Ichnaea API a 404 is not a failure — it means the database has no
+      // entry for these access points. Distinguish it, because "nobody has mapped this
+      // marina" needs a different response than "the service is down".
+      wifiLastError = r.status === 404
+        ? `no coverage: the database doesn't know these ${aps.length} access points`
+        : `provider HTTP ${r.status}`
+      return null
+    }
+    const j = await r.json()
+    const lat = j && j.location && Number(j.location.lat)
+    const lon = j && j.location && Number(j.location.lng)
+    if (!isFinite(lat) || !isFinite(lon)) { wifiLastError = 'no location in response'; return null }
+    wifiLastError = null
+    wifiFix = { lat, lon, accuracy: Number(j.accuracy) || null, ts: Date.now(), aps: aps.length }
+    // Hand it to gps.py for startup aiding. Written atomically so a crash mid-write
+    // can't leave a truncated file that would seed the receiver with nonsense.
+    try {
+      fs.writeFileSync(`${WIFI_POS_FILE}.tmp`, JSON.stringify(wifiFix))
+      fs.renameSync(`${WIFI_POS_FILE}.tmp`, WIFI_POS_FILE)
+    } catch (e) { /* non-fatal */ }
+    return wifiFix
+  } catch (e) {
+    wifiLastError = e && e.name === 'AbortError' ? 'provider timeout (no internet?)' : String(e.message || e)
+    return null
+  }
+}
+
+// Only while the GPS has nothing. The moment it fixes, this stops running entirely.
+setInterval(() => {
+  if (!WIFI_LOC_ON) return
+  if ((gpsState.fix || 0) >= 1) return
+  if (Date.now() - wifiLastTry < WIFI_LOC_EVERY) return
+  wifiLastTry = Date.now()
+  wifiLocate().catch(() => {})
+}, 30000)
+
+// ---- AssistNow orbit refresh, run from the boat ----------------------------------
+// Mirrors ansible/maintenance.yml so the helm can do it without a laptop. Validates
+// before overwriting: a marina captive portal answers HTTP 200 with a login page, and
+// silently replacing good aiding data with HTML is exactly the failure you'd only
+// discover on a cold morning with no fix.
+const ORBIT_FILE = `${__dirname}/mga-offline.ubx`
+const ASSIST_CREDS = process.env.GPS_ASSIST_CREDS || '/home/pi/assistnow-credentials.json'
+// The free Predictive Orbits tier is quota-limited (403003). Each file already covers 14
+// days, so re-downloading a fresh one buys nothing and can lock you out right when you
+// need it. Skip unless the data is genuinely aging, or the caller insists.
+const ORBIT_MIN_AGE_MS = 12 * 3600 * 1000
+function orbitFileInfo() {
+  try {
+    const st = fs.statSync(ORBIT_FILE)
+    return { exists: true, ageMs: Date.now() - st.mtimeMs, bytes: st.size }
+  } catch (e) { return { exists: false, ageMs: Infinity, bytes: 0 } }
+}
+async function refreshOrbits(force = false) {
+  let chip = process.env.GPS_ASSIST_CHIPCODE || null
+  try { chip = JSON.parse(fs.readFileSync(ASSIST_CREDS, 'utf8')).chipcode || chip } catch (e) { /* env may still have it */ }
+  if (!chip) return { ok: false, error: 'no AssistNow chipcode configured' }
+  const info = orbitFileInfo()
+  if (!force && info.exists && info.ageMs < ORBIT_MIN_AGE_MS) {
+    return {
+      ok: true, skipped: true, ageH: Math.round(info.ageMs / 3600000),
+      error: null, note: 'current data is recent — skipped to preserve the free download quota',
+    }
+  }
+  const url = 'https://assistnow.services.u-blox.com/GetAssistNowData.ashx'
+    + `?chipcode=${encodeURIComponent(chip)}&gnss=gps,gal,bds,glo&data=uporb_14,ualm`
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 60000)
+  let buf
+  try {
+    const r = await fetch(url, { signal: ctrl.signal })
+    clearTimeout(timer)
+    if (!r.ok) {
+      // u-blox returns a JSON error body; 403003 is the free-tier quota, which is a
+      // "come back later" rather than anything broken.
+      let detail = `HTTP ${r.status}`
+      try {
+        const j = JSON.parse(await r.text())
+        if (j && j.Message) detail = j.ErrorCode === 403003 ? 'download quota reached — try again tomorrow; existing data is still valid' : j.Message
+      } catch (e) { /* keep the status */ }
+      return { ok: false, error: detail }
+    }
+    buf = Buffer.from(await r.arrayBuffer())
+  } catch (e) {
+    clearTimeout(timer)
+    return { ok: false, error: e && e.name === 'AbortError' ? 'timed out — no internet?' : String(e.message || e) }
+  }
+  if (buf.length < 10000 || buf[0] !== 0xb5 || buf[1] !== 0x62) {
+    return { ok: false, error: `not UBX data (${buf.length} bytes) — captive portal?` }
+  }
+  const days = new Map()
+  for (let i = 0; i + 8 <= buf.length;) {
+    if (buf[i] !== 0xb5 || buf[i + 1] !== 0x62) { i++; continue }
+    const ln = buf.readUInt16LE(i + 4)
+    if (i + 6 + ln + 2 > buf.length) break
+    if (buf[i + 2] === 0x13 && buf[i + 3] === 0x20 && ln >= 8) {
+      const p = buf.subarray(i + 6, i + 6 + ln)
+      const key = `20${String(p[4]).padStart(2, '0')}-${String(p[5]).padStart(2, '0')}-${String(p[6]).padStart(2, '0')}`
+      days.set(key, (days.get(key) || 0) + 1)
+    }
+    i += 6 + ln + 2
+  }
+  if (!days.size) return { ok: false, error: 'no orbit records in the download' }
+  try {
+    fs.writeFileSync(`${ORBIT_FILE}.tmp`, buf)
+    fs.renameSync(`${ORBIT_FILE}.tmp`, ORBIT_FILE)
+  } catch (e) {
+    return { ok: false, error: `could not save: ${e.message}` }
+  }
+  // Bounce just the GPS helper so it injects today's records; the stereo keeps playing.
+  try { if (gpsProc) gpsProc.kill() } catch (e) { /* respawns on its own */ }
+  const sorted = [...days.keys()].sort()
+  return {
+    ok: true, bytes: buf.length, days: days.size,
+    records: [...days.values()].reduce((a, b) => a + b, 0),
+    from: sorted[0], to: sorted[sorted.length - 1],
+  }
+}
+
 async function wifiConnect(b) {
   const ssid = String(b.ssid || '')
   const pw = String(b.password || '')
@@ -1154,7 +1359,266 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'GET' && path === '/api/imu') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ...(attitude || {}), tempC: ambientC, htuC, humidity }))
+    res.end(JSON.stringify({ ...(attitude || {}), tempC: ambientC, htuC, humidity, shtC, shtHumidity, headingMag }))
+    return
+  }
+  // Sensor history for the helm's charts. ?minutes=N trims the window (default 60).
+  // Returns whole samples so every series shares one timebase — the client just picks
+  // the keys it wants to plot.
+  if (req.method === 'GET' && path === '/api/history') {
+    const mins = Math.max(1, Math.min(360, Number(new URL(req.url, 'http://x').searchParams.get('minutes')) || 60))
+    const since = Date.now() - mins * 60000
+    const rows = sensorHist.filter((s) => s.t >= since)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ stepMs: HIST_STEP_MS, minutes: mins, samples: rows }))
+    return
+  }
+  // Refresh AssistNow predictive orbits from the boat itself — same job as
+  // `npm run maintain -- --tags gps-orbits`, but runnable from the helm with no laptop.
+  if (req.method === 'POST' && path === '/api/orbits/refresh') {
+    const force = new URL(req.url, 'http://x').searchParams.get('force') === '1'
+    refreshOrbits(force).then((r) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(r))
+    }).catch((e) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: String(e.message || e) }))
+    })
+    return
+  }
+  // Screen off. DPMS wakes on any touch, so there's no "wake" endpoint to get wrong —
+  // and no way to end up with a dark screen you can't recover without a keyboard.
+  if (req.method === 'POST' && path === '/api/system/sleep') {
+    execP('DISPLAY=:0 XAUTHORITY=/home/pi/.Xauthority xset dpms force off 2>&1')
+      .then(() => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}') })
+    return
+  }
+  if (req.method === 'POST' && path === '/api/system/reboot') {
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}')
+    // Answer first, then go down — otherwise the helm never sees the acknowledgement.
+    setTimeout(() => { execP('sudo systemctl reboot') }, 600)
+    return
+  }
+  // Magnetometer (compass) calibration, driven from the helm instead of over SSH. Runs
+  // imu.py's --calibrate-mag as a child; the main imu.py keeps running and both read the
+  // bus — the kernel serialises I2C, so they coexist.
+  if (req.method === 'POST' && path === '/api/imu/calibrate-mag') {
+    if (magCal.running) {
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: 'already running' }))
+      return
+    }
+    const secs = Math.max(20, Math.min(180, Number(new URL(req.url, 'http://x').searchParams.get('seconds')) || 90))
+    startMagCal(secs)
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, seconds: secs }))
+    return
+  }
+  if (req.method === 'GET' && path === '/api/imu/calibrate-mag') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      ...magCal,
+      elapsed: magCal.startedAt ? Math.round((Date.now() - magCal.startedAt) / 1000) : 0,
+      calibration: readMagCal(),
+    }))
+    return
+  }
+  // Live input events for the helm: button presses, knob deltas in UI modes, and mode
+  // changes. SSE rather than polling — a button press that arrives 200ms late feels broken.
+  if (req.method === 'GET' && path === '/api/input') {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*' })
+    res.write(`data: ${JSON.stringify({ type: 'mode', value: encMode, t: Date.now() })}\n\n`)
+    inputClients.add(res)
+    req.on('close', () => inputClients.delete(res))
+    return
+  }
+  if (req.method === 'POST' && path === '/api/encoder/mode') {
+    const m = new URL(req.url, 'http://x').searchParams.get('mode')
+    if (ENC_MODES.includes(m)) { encMode = m; pushInput({ type: 'mode', value: encMode }) }
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, mode: encMode }))
+    return
+  }
+  if (req.method === 'GET' && path === '/api/encoder/volcfg') {
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ...volCfg, perStep: Number(volPerStep().toFixed(2)) }))
+    return
+  }
+  if (req.method === 'POST' && path === '/api/encoder/volcfg') {
+    const q = new URL(req.url, 'http://x').searchParams
+    if (q.get('turns')) volCfg.turns = Math.max(0.5, Math.min(8, Number(q.get('turns')) || 2))
+    if (q.get('detentsPerRev')) volCfg.detentsPerRev = Math.max(8, Math.min(96, Number(q.get('detentsPerRev')) || 24))
+    if (q.get('accel') != null) volCfg.accel = q.get('accel') === '1'
+    volAccum = 0
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ...volCfg, perStep: Number(volPerStep().toFixed(2)) }))
+    return
+  }
+  if (req.method === 'GET' && path === '/api/encoder') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ...encoder, mode: encMode, modes: ENC_MODES, buttons: btnStats, ageMs: encoder.updated ? Date.now() - encoder.updated : null }))
+    return
+  }
+  if (req.method === 'POST' && path === '/api/encoder/reset') {
+    for (const k of Object.keys(btnStats)) delete btnStats[k]
+    // Zero the display without restarting the reader, so a test run starts clean.
+    if (encoder.raw) encZero = { pos: encoder.raw.pos, invalid: encoder.raw.invalid, edges: encoder.raw.edges }
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}')
+    return
+  }
+  if (req.method === 'GET' && path === '/api/imu/orient') {
+    const cfg = readImuConfig()
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ...cfg, gravity, preview: orientPreview(gravity), attitude, headingMag }))
+    return
+  }
+  // Manual trim of the zero, in degrees, applied as a delta so the buttons can just
+  // nudge. imu.py re-reads the config as it runs, so the gauge moves as you press.
+  if (req.method === 'POST' && path === '/api/imu/offset') {
+    const p = new URL(req.url, 'http://x').searchParams
+    const cfg = readImuConfig()
+    const dR = Number(p.get('dRoll')) || 0
+    const dP = Number(p.get('dPitch')) || 0
+    const next = p.get('reset') === '1'
+      ? { ...cfg, rollOffset: 0, pitchOffset: 0 }
+      : {
+        ...cfg,
+        // Offsets are subtracted from the reading, so nudging the displayed value up
+        // means moving the offset down — negate here rather than inverting the labels.
+        rollOffset: Number(((cfg.rollOffset || 0) - dR).toFixed(3)),
+        pitchOffset: Number(((cfg.pitchOffset || 0) - dP).toFixed(3)),
+      }
+    let ok = true
+    try { writeImuConfig(next) } catch (e) { ok = false }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok, rollOffset: next.rollOffset, pitchOffset: next.pitchOffset }))
+    return
+  }
+  if (req.method === 'POST' && path === '/api/imu/orient') {
+    const axis = String(new URL(req.url, 'http://x').searchParams.get('axis') || '').toUpperCase()
+    if (!['X', 'Y', 'Z'].includes(axis)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"ok":false,"error":"axis must be X, Y or Z"}')
+      return
+    }
+    // Changing the frame invalidates the old zero — keeping it would silently bias the
+    // new axis by an offset measured in a different orientation.
+    try { writeImuConfig({ ...readImuConfig(), upAxis: axis, rollOffset: 0, pitchOffset: 0 }) } catch (e) { /* reported below */ }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, upAxis: axis, note: 'zero offsets cleared — re-level after changing axis' }))
+    return
+  }
+  // Average the attitude over a window so wave motion cancels instead of being baked in
+  // as the zero. Reports the spread, so a capture taken in a rolling anchorage is
+  // visibly untrustworthy rather than quietly wrong.
+  // Guided two-step orientation capture. Averages briefly so a hand resting on the
+  // bracket doesn't skew the frame.
+  if (req.method === 'POST' && path === '/api/imu/teach') {
+    const step = new URL(req.url, 'http://x').searchParams.get('step')
+    if (!['level', 'bow'].includes(step)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"ok":false,"error":"step must be level or bow"}')
+      return
+    }
+    const samples = []
+    const iv = setInterval(() => { if (gravity) samples.push([gravity.x, gravity.y, gravity.z]) }, 100)
+    setTimeout(() => {
+      clearInterval(iv)
+      if (samples.length < 5) {
+        res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":false,"error":"no sensor data"}')
+        return
+      }
+      const avg = [0, 1, 2].map((k) => samples.reduce((s, v) => s + v[k], 0) / samples.length)
+      const cfg = readImuConfig()
+      if (step === 'level') {
+        // Keep it aside until the bow capture completes; a half-finished teach must not
+        // disturb a working frame.
+        try { writeImuConfig({ ...cfg, teachLevel: avg }) } catch (e) { /* reported below */ }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, step, vector: avg.map((v) => Number(v.toFixed(3))) }))
+        return
+      }
+      if (!cfg.teachLevel) {
+        res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":false,"error":"capture the level position first"}')
+        return
+      }
+      const fr = frameFromCaptures(cfg.teachLevel, avg)
+      if (fr.error) {
+        res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: fr.error }))
+        return
+      }
+      // A new frame invalidates any previous zero.
+      try {
+        writeImuConfig({ upAxis: cfg.upAxis || 'X', rollOffset: 0, pitchOffset: 0, frame: { up: fr.up, fore: fr.fore, stbd: fr.stbd } })
+      } catch (e) { /* reported below */ }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, step, tiltDeg: fr.tiltDeg, frame: fr }))
+    }, 2000)
+    return
+  }
+  if (req.method === 'POST' && path === '/api/imu/level') {
+    const q = new URL(req.url, 'http://x').searchParams
+    // Two jobs that look alike but aren't. At rest, motion is error: a few seconds is
+    // plenty and movement means the reading is contaminated, so we refuse rather than
+    // bake in a wave. Under way, motion is expected: the capture must span many wave
+    // periods so the roll averages to the true mean, and high spread is normal.
+    const mode = q.get('mode') === 'moving' ? 'moving' : 'still'
+    const dflt = mode === 'moving' ? 60 : 2
+    const lo = mode === 'moving' ? 20 : 1   // at rest there is nothing to average out
+    const secs = Math.max(lo, Math.min(180, Number(q.get('seconds')) || dflt))
+    const rolls = [], pitches = []
+    const iv = setInterval(() => {
+      if (attitude && attitude.pitch != null) {
+        if (attitude.roll != null) rolls.push(attitude.roll)
+        pitches.push(attitude.pitch)
+      }
+    }, 100)
+    setTimeout(() => {
+      clearInterval(iv)
+      if (!pitches.length) {
+        res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":false,"error":"no attitude data during the capture"}')
+        return
+      }
+      const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length
+      const sd = (a) => (a.length < 2 ? 0 : Math.sqrt(a.reduce((s, v) => s + (v - mean(a)) ** 2, 0) / a.length))
+      const cfg = readImuConfig()
+      const mr = rolls.length ? mean(rolls) : 0
+      const mp = mean(pitches)
+      const sdr = sd(rolls), sdp = sd(pitches)
+      const worst = Math.max(sdr, sdp)
+      const reply = {
+        seconds: secs, mode, samples: pitches.length,
+        movement: { roll: Number(sdr.toFixed(2)), pitch: Number(sdp.toFixed(2)) },
+      }
+      // A still calibration contaminated by movement is worse than none — it silently
+      // biases every later reading. Refuse it and point at the right mode.
+      if (mode === 'still' && worst > 1.0) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          ...reply, ok: false,
+          error: `the boat moved ±${worst.toFixed(1)}° during the capture — too much for a still calibration. `
+            + 'Wait for calm water, or use Under way mode, which averages the motion out over a longer window.',
+        }))
+        return
+      }
+      // Measured values already have the current offset applied, so accumulate.
+      const next = {
+        ...cfg,
+        rollOffset: Number(((cfg.rollOffset || 0) + mr).toFixed(3)),
+        pitchOffset: Number(((cfg.pitchOffset || 0) + mp).toFixed(3)),
+      }
+      let saved = true
+      try { writeImuConfig(next) } catch (e) { saved = false }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        ...reply, ok: saved,
+        rollOffset: next.rollOffset, pitchOffset: next.pitchOffset,
+        // A sane mounting needs a small zero. A huge one means the up-axis choice is
+        // wrong and we are cancelling the wrong thing — say so rather than let the
+        // gauge read plausibly while being fundamentally misconfigured.
+        warning: Math.abs(mr) > 45 || Math.abs(mp) > 45
+          ? `zero of ${mr.toFixed(0)}° heel / ${mp.toFixed(0)}° trim is very large — the up-axis is probably wrong. Run the guided setup instead.`
+          : null,
+        quality: mode === 'moving'
+          ? (secs >= 45 && worst > 0.5
+            ? `averaged ${secs}s of motion (±${worst.toFixed(1)}°) — the mean should be close to true level`
+            : worst <= 0.5 ? 'barely moving — a still calibration would be just as good'
+              : `only ${secs}s of a moving boat — run 60s or more so the waves average out properly`)
+          : worst < 0.3 ? 'rock steady — this zero is solid'
+            : 'slight motion, within tolerance for a still calibration',
+      }))
+    }, secs * 1000)
     return
   }
   if (req.method === 'GET' && path === '/api/system') {
@@ -1183,9 +1647,27 @@ const server = http.createServer((req, res) => {
     })
     return
   }
+  // Coarse Wi-Fi position. Separate endpoint and separate field name from anything the
+  // navigation stack reads — it must never be mistaken for a fix.
+  if (req.method === 'GET' && path === '/api/wifiloc') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      enabled: WIFI_LOC_ON,
+      approx: wifiFix ? { ...wifiFix, ageS: Math.round((Date.now() - wifiFix.ts) / 1000) } : null,
+      error: wifiLastError, provider: WIFI_LOC_URL,
+    }))
+    return
+  }
   if (req.method === 'GET' && path === '/api/gps') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ...gpsState, raw: gpsRaw.slice(-24) }))
+    // `approx` rides along for the helm's benefit but is a distinct field from the fix
+    // data — nothing merges the two.
+    res.end(JSON.stringify({
+      ...gpsState,
+      raw: gpsRaw.slice(-24),
+      approx: wifiFix && (gpsState.fix || 0) < 1
+        ? { ...wifiFix, ageS: Math.round((Date.now() - wifiFix.ts) / 1000), source: 'wifi' } : null,
+    }))
     return
   }
   if (req.method === 'GET' && path === '/api/i2c') {
@@ -1195,13 +1677,23 @@ const server = http.createServer((req, res) => {
       const runningVal = {
         MCP9808: ambientC != null ? `${ambientC.toFixed(1)} C` : null,
         HTU31D: htuC != null ? `${htuC.toFixed(1)} C${humidity != null ? ` / ${Math.round(humidity)}% RH` : ''}` : null,
-        ADXL345: attitude ? `${attitude.roll.toFixed(0)} deg heel` : null,
+        SHT41: shtC != null ? `${shtC.toFixed(1)} C${shtHumidity != null ? ` / ${Math.round(shtHumidity)}% RH` : ''}` : null,
+        // Only the accelerometer actually driving attitude reports a live heel value;
+        // the other one is present on the bus but idle.
+        ICM20948: attitude && attitude.source === 'icm'
+          ? `${attitude.roll != null ? `${attitude.roll.toFixed(0)} deg heel` : 'heel n/a (vertical)'}`
+            + `${attitude.pitch != null ? ` / ${attitude.pitch.toFixed(0)} deg trim` : ''}`
+            + `${headingMag != null ? ` / ${Math.round(headingMag)} deg mag` : ''}` : null,
+        ADXL345: attitude && attitude.source === 'adxl' && attitude.roll != null ? `${attitude.roll.toFixed(0)} deg heel` : null,
+        // Expander pins read as inputs; show both ports so wiring shows up live.
+        MCP23017: ioPorts ? `A 0x${ioPorts.a.toString(16).padStart(2, '0')} · B 0x${ioPorts.b.toString(16).padStart(2, '0')}` : null,
       }
-      const tempByName = { MCP9808: ambientC, HTU31D: htuC }
+      const tempByName = { MCP9808: ambientC, HTU31D: htuC, SHT41: shtC }
+      const humByName = { HTU31D: humidity, SHT41: shtHumidity }
       const devices = (scan.devices || []).map((d) => ({
         ...d, running: !!runningVal[d.name], value: runningVal[d.name] || null,
         tempC: typeof tempByName[d.name] === 'number' ? tempByName[d.name] : null,
-        humidity: d.name === 'HTU31D' && typeof humidity === 'number' ? humidity : null,
+        humidity: typeof humByName[d.name] === 'number' ? humByName[d.name] : null,
       }))
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ devices, error: scan.error || null }))
     }).catch(() => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"devices":[]}') })
@@ -1255,13 +1747,268 @@ setInterval(() => {
 
 killPipeline()
 // Resume persisted state so a deploy/restart doesn't turn the stereo off.
-// ---- IMU: ADXL345 tilt (heel/trim) via the imu.py helper (same pipe pattern as
-// bipart.py). attitude stays null when no sensor is present. ----
+// ---- IMU: ICM20948 (preferred) or ADXL345 tilt (heel/trim) via the imu.py helper
+// (same pipe pattern as bipart.py). attitude stays null when no sensor is present. ----
 let imuProc = null
-let attitude = null // { roll, pitch } degrees, or null when no ADXL345
+let attitude = null // { roll, pitch, source } degrees + 'icm'|'adxl', or null when neither
 let ambientC = null // MCP9808 ambient temp (°C), or null when absent
 let htuC = null     // HTU31D ambient temp (°C), or null when absent
 let humidity = null // HTU31D relative humidity (%), or null when absent
+let shtC = null     // SHT41 ambient temp (°C), or null when absent
+let shtHumidity = null // SHT41 relative humidity (%), or null when absent
+// AK09916 tilt-compensated magnetic heading (deg). imu.py also pushes this straight to
+// SignalK as $HCHDM, so the compass gauge reads it via navigation.headingMagnetic —
+// this copy is for the Sensors diagnostic screen.
+let headingMag = null
+// MCP23017 (0x20) input ports as {a,b} bytes, or null when the expander is absent.
+// Nothing is wired to it yet, so these read as constants until the knob/buttons land.
+let ioPorts = null
+// Raw gravity vector, pre-orientation — feeds the helm's mounting-calibration dialog.
+let gravity = null
+
+// ---- IMU mounting calibration -----------------------------------------------------
+// Which axis is vertical depends on how the board is bolted in, and the zero depends on
+// how the boat sits. Both are adjustable from the helm and take effect live: imu.py
+// re-reads this file as it runs, so the gauge responds while you're holding the bracket.
+const IMU_CONFIG = `${__dirname}/imuconfig.json`
+function readImuConfig() {
+  try { return JSON.parse(fs.readFileSync(IMU_CONFIG, 'utf8')) } catch (e) { return { upAxis: 'X', rollOffset: 0, pitchOffset: 0 } }
+}
+function writeImuConfig(cfg) {
+  fs.writeFileSync(`${IMU_CONFIG}.tmp`, JSON.stringify(cfg, null, 2))
+  fs.renameSync(`${IMU_CONFIG}.tmp`, IMU_CONFIG)
+}
+// Guided orientation: derive the full sensor frame from two physical captures instead of
+// asking which chip axis is "up" — a question nobody can answer by looking at a PCB.
+//   step 1 (level)  : the measured vector points at the sky, so it IS the up axis
+//   step 2 (bow up) : lifting the bow rotates that sky-vector toward the stern, and the
+//                     change identifies the fore-aft axis *and* its sign
+// Starboard falls out as the cross product, giving a complete right-handed frame with
+// correct signs — no guessing, and no way to get heel and trim swapped.
+function normalize(v) {
+  const n = Math.hypot(v[0], v[1], v[2]) || 1
+  return [v[0] / n, v[1] / n, v[2] / n]
+}
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+
+function frameFromCaptures(level, bow) {
+  const u = normalize(level)
+  // Component of the change perpendicular to up; bow-up tilts the sky-vector sternward,
+  // so forward is the negative of that.
+  const d = [bow[0] - level[0], bow[1] - level[1], bow[2] - level[2]]
+  const perp = [d[0] - dot3(d, u) * u[0], d[1] - dot3(d, u) * u[1], d[2] - dot3(d, u) * u[2]]
+  const mag = Math.hypot(perp[0], perp[1], perp[2])
+  if (mag < 0.08) return { error: 'not enough tilt between the two captures — lift the bow end further (about 15° is plenty)' }
+  const f = normalize([-perp[0], -perp[1], -perp[2]])
+  const s = cross3(u, f)                    // starboard
+  return { up: u, fore: f, stbd: normalize(s), tiltDeg: Number((Math.asin(Math.min(1, mag)) * 180 / Math.PI).toFixed(1)) }
+}
+
+// ---- Magnetometer calibration runner ----------------------------------------------
+// Hard/soft-iron correction has to be redone whenever the module moves, so it belongs on
+// the helm rather than behind an SSH session. Progress comes from the script's stderr.
+const magCal = { running: false, startedAt: 0, seconds: 0, lines: [], exit: null }
+function readMagCal() {
+  try { return JSON.parse(fs.readFileSync(`${__dirname}/magcal.json`, 'utf8')) } catch (e) { return null }
+}
+function startMagCal(secs) {
+  magCal.running = true; magCal.startedAt = Date.now(); magCal.seconds = secs
+  magCal.lines = []; magCal.exit = null
+  const p = spawn('python3', [`${__dirname}/imu.py`, '--calibrate-mag', `--seconds=${secs}`],
+    { stdio: ['ignore', 'ignore', 'pipe'] })
+  let buf = ''
+  p.stderr.on('data', (d) => {
+    buf += d.toString()
+    let nl
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).replace(/\s+$/, ''); buf = buf.slice(nl + 1)
+      if (line) { magCal.lines.push(line); while (magCal.lines.length > 40) magCal.lines.shift() }
+    }
+  })
+  p.on('error', (e) => { magCal.running = false; magCal.exit = -1; magCal.lines.push(`failed to start: ${e.message}`) })
+  p.on('exit', (code) => { magCal.running = false; magCal.exit = code })
+}
+
+// What roll/pitch would read under each possible mounting, so the dialog can show the
+// consequence of each choice instead of asking the user to guess.
+function orientPreview(g) {
+  if (!g) return []
+  const deg = (r) => (r * 180) / Math.PI
+  const forms = { X: [g.y, g.z, g.x], Y: [g.z, g.x, g.y], Z: [g.x, g.y, g.z] }
+  return Object.entries(forms).map(([axis, [ax, ay, az]]) => {
+    const horiz = Math.sqrt(ay * ay + az * az)
+    return {
+      axis,
+      roll: horiz < 0.15 ? null : Number(deg(Math.atan2(ay, az)).toFixed(1)),
+      pitch: Number(deg(Math.atan2(-ax, horiz)).toFixed(1)),
+      horiz: Number(horiz.toFixed(3)),
+      usable: horiz >= 0.15,
+    }
+  })
+}
+
+// ---- Sensor history: one sample every 10s, kept in memory for the helm's history
+// charts. 6h at 10s = 2160 points (~250 KB), which is plenty to see a trend without
+// paying for a database. It starts empty on a service restart — deliberately, since
+// this is a diagnostic view, not a log. ----
+const HIST_STEP_MS = 10000
+const HIST_MAX = 2160
+const sensorHist = []
+// Straight from sysfs rather than systemInfo() — that shells out to ps/vcgencmd, which
+// is far too heavy to run on a 10s sampling loop.
+function cpuTempC() {
+  try { return Math.round(Number(fs.readFileSync('/sys/class/thermal/thermal_zone0/temp', 'utf8')) / 100) / 10 } catch (e) { return null }
+}
+setInterval(() => {
+  sensorHist.push({
+    t: Date.now(), cpu: cpuTempC(),
+    mcp: ambientC, htuT: htuC, htuH: humidity, shtT: shtC, shtH: shtHumidity,
+    roll: attitude ? attitude.roll : null, pitch: attitude ? attitude.pitch : null,
+    hdg: headingMag, ioA: ioPorts ? ioPorts.a : null, ioB: ioPorts ? ioPorts.b : null,
+  })
+  while (sensorHist.length > HIST_MAX) sensorHist.shift()
+}, HIST_STEP_MS)
+
+// ---- Rotary encoder on the MCP23017 -----------------------------------------------
+// Its own process because it has to poll far faster than the sensor loop. `invalid` is
+// the number worth watching: impossible quadrature transitions mean states are being
+// missed, which is what marginal logic levels or contact bounce look like.
+let encProc = null
+let encoder = { alive: false, a: 0, b: 0, pos: 0, det: 0, dir: 0, invalid: 0, edges: 0, hz: 0, portA: 0, portB: 0, updated: 0 }
+let encZero = { pos: 0, invalid: 0, edges: 0 }
+
+// ---- Physical control surface -----------------------------------------------------
+// What the knob does depends on the mode; button 4 cycles it. Volume and FM tuning are
+// applied HERE rather than in the helm: the knob then works instantly, and keeps working
+// if the screen is asleep or the browser has wandered off. Modes that move a cursor
+// around the UI have to be sent to the helm, since only it knows what's on screen.
+const ENC_MODES = ['volume', 'tune', 'nav', 'value']
+let encMode = 'volume'
+let encRemainder = 0            // leftover quadrature counts between detents
+let encPrevRaw = null
+const inputClients = new Set()  // SSE subscribers (the helm)
+function pushInput(ev) {
+  const line = `data: ${JSON.stringify({ ...ev, mode: encMode, t: Date.now() })}\n\n`
+  for (const r of inputClients) { try { r.write(line) } catch (e) { /* dropped below */ } }
+}
+// Volume sensitivity. The encoder gives ~24 detents per revolution against a 0-30
+// range, so one detent per step made a single turn sweep the entire range. Two detents
+// per step gives ~2.5 turns end to end for normal use, and a speed-based multiplier
+// keeps a fast spin quick — fine control when you're easing it, coarse when you mean it.
+// Tunable from the helm (Settings -> Config), because how a knob should feel is a matter
+// of taste rather than something to hard-code. perStep = detents per volume step; accel
+// adds at most a doubling for a genuinely fast spin. The earlier 4x multiplier meant half
+// a turn crossed the whole range, which is why it felt uncontrollable.
+// Expressed as "turns to cross the whole range", which is how it actually gets judged.
+// detentsPerRev is the encoder's mechanical detent count (24 is typical); the divisor is
+// derived, so changing either keeps the feel honest.
+const volCfg = {
+  turns: Number(process.env.VOL_TURNS || 2),
+  detentsPerRev: Number(process.env.VOL_DETENTS_PER_REV || 24),
+  accel: process.env.VOL_ACCEL !== '0',
+}
+const volPerStep = () => Math.max(0.2, (volCfg.turns * volCfg.detentsPerRev) / 30)
+let volAccum = 0, lastDetentAt = 0, tuneTimer = null
+function volumeSteps(detents, now) {
+  const dt = Math.max(0.02, (now - lastDetentAt) / 1000)
+  lastDetentAt = now
+  const rate = Math.abs(detents) / dt                 // detents per second
+  const accel = volCfg.accel && rate > 30 ? 2 : 1
+  volAccum += (detents * accel) / volPerStep()
+  const steps = Math.trunc(volAccum)                  // fractional part carries, so slow
+  volAccum -= steps                                   // turns are never swallowed
+  return steps
+}
+function applyEncoder(detents) {
+  if (!detents) return
+  if (encMode === 'volume') {
+    const steps = volumeSteps(detents, Date.now())
+    if (!steps) return
+    const v = Math.max(0, Math.min(30, (state.volume || 0) + steps))
+    try { actions.volume({ volume: v }) } catch (e) { /* ignore */ }
+    pushInput({ type: 'volume', value: v })
+  } else if (encMode === 'tune') {
+    // Live scroll across the FM band, 0.2 MHz per detent (US channel spacing).
+    //
+    // Retuning restarts the whole rtl_fm pipeline, so calling tune() per detent queued a
+    // kill+respawn for every click and the knob felt dead. Move the displayed frequency
+    // immediately and defer the actual retune until you pause — the band scrolls
+    // smoothly under your hand and the radio retunes once, where you stopped.
+    const f = Math.round(((state.fm && state.fm.freq ? state.fm.freq : 88.1) + detents * 0.2) * 10) / 10
+    const clamped = Math.max(87.9, Math.min(107.9, f))   // stop at the band edges
+    state.fm.freq = Math.round(clamped * 10) / 10
+    pushInput({ type: 'tune', value: state.fm.freq })
+    clearTimeout(tuneTimer)
+    tuneTimer = setTimeout(() => { if (state.power && state.source === 'FM') scheduleStart() }, 320)
+  } else {
+    pushInput({ type: encMode, delta: detents })   // 'nav' / 'value' -> the helm decides
+  }
+}
+const btnStats = {}      // pin -> { presses, longs, last, lastAt }
+function onButton(pin, kind) {
+  const b = btnStats[pin] || (btnStats[pin] = { presses: 0, longs: 0, last: null, lastAt: 0 })
+  if (kind === 'long') b.longs++; else b.presses++
+  b.last = kind; b.lastAt = Date.now()
+  // Button 4 (GPA5) owns the knob's mode; everything else is context and belongs to the
+  // helm, which knows which view is showing.
+  if (pin === 5 && kind === 'press') {
+    encMode = ENC_MODES[(ENC_MODES.indexOf(encMode) + 1) % ENC_MODES.length]
+    pushInput({ type: 'mode', value: encMode })
+    // Still emit the button event: without it the helm gets no acknowledgement and the
+    // key looks dead, even though the mode changed.
+    pushInput({ type: 'button', pin, press: kind })
+    return
+  }
+  pushInput({ type: 'button', pin, press: kind })
+}
+function startEncoder() {
+  const p = `${__dirname}/encoder.py`
+  try { if (!fs.existsSync(p)) return } catch (e) { return }
+  encProc = spawn('python3', [p], { stdio: ['ignore', 'pipe', 'ignore'] })
+  let buf = ''
+  encProc.stdout.on('data', (d) => {
+    buf += d.toString(); let nl
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
+      if (!line) continue
+      if (line === 'READY') { encoder.alive = true; continue }
+      if (line.startsWith('DEAD')) { encoder.alive = false; continue }
+      if (line.startsWith('BTN ')) {
+        const [, pin, kind] = line.split(' ')
+        try { onButton(Number(pin), kind) } catch (e) { /* keep reading */ }
+        continue
+      }
+      if (!line.startsWith('ENC ')) continue
+      const f = {}
+      for (const kv of line.slice(4).split(' ')) {
+        const eq = kv.indexOf('=')
+        if (eq > 0) f[kv.slice(0, eq)] = kv.slice(eq + 1)
+      }
+      const n = (k) => (f[k] != null ? Number(f[k]) : 0)
+      encoder = {
+        alive: true, a: n('a'), b: n('b'),
+        pos: n('pos') - encZero.pos, det: Math.trunc((n('pos') - encZero.pos) / 4),
+        dir: n('dir'), invalid: n('inv') - encZero.invalid, edges: n('edges') - encZero.edges,
+        hz: n('hz'), poll: n('poll'), portA: parseInt(f.pa, 16) || 0, portB: parseInt(f.pb, 16) || 0,
+        raw: { pos: n('pos'), invalid: n('inv'), edges: n('edges') },
+        updated: Date.now(),
+      }
+      // Act on movement in whole detents; the remainder carries so slow turns aren't lost.
+      const prevPos = encPrevRaw
+      encPrevRaw = encoder.raw.pos
+      if (prevPos != null) {
+        encRemainder += encoder.raw.pos - prevPos
+        const detents = Math.trunc(encRemainder / 4)
+        if (detents) { encRemainder -= detents * 4; try { applyEncoder(detents) } catch (e) { /* ignore */ } }
+      }
+    }
+  })
+  encProc.on('error', () => { encProc = null; encoder.alive = false })
+  encProc.on('exit', () => { encProc = null; encoder.alive = false; setTimeout(startEncoder, 5000) })
+}
+startEncoder()
+
 function startImu() {
   const imuPath = `${__dirname}/imu.py`
   try { if (!fs.existsSync(imuPath)) return } catch (e) { return }
@@ -1274,18 +2021,32 @@ function startImu() {
       const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
       if (!line) continue
       if (line === 'READY') continue
-      if (line.startsWith('DEAD')) { attitude = null; ambientC = null; htuC = null; humidity = null; continue }
-      // "roll pitch temp htuT hum" — any field may be "nan" if that sensor is absent.
+      if (line.startsWith('DEAD')) { attitude = null; ambientC = null; htuC = null; humidity = null; shtC = null; shtHumidity = null; headingMag = null; continue }
+      // "roll pitch temp htuT hum shtT shtH hdg src ioA ioB" — any numeric field may be
+      // "nan" if that sensor is absent. src names the accelerometer driving attitude; an
+      // older imu.py sends fewer fields, which parse to NaN/undefined and land as null.
       const m = line.split(' ')
       const roll = Number(m[0]), pitch = Number(m[1]), temp = Number(m[2]), ht = Number(m[3]), hu = Number(m[4])
-      attitude = (isFinite(roll) && isFinite(pitch)) ? { roll, pitch } : null
+      const st = Number(m[5]), sh = Number(m[6]), hd = Number(m[7])
+      const src = m[8] && m[8] !== 'none' ? m[8] : null
+      const ia = Number(m[9]), ib = Number(m[10])
+      ioPorts = (isFinite(ia) && isFinite(ib)) ? { a: ia, b: ib } : null
+      const rx = Number(m[11]), ry = Number(m[12]), rz = Number(m[13])
+      gravity = (isFinite(rx) && isFinite(ry) && isFinite(rz)) ? { x: rx, y: ry, z: rz } : null
+      // Roll and pitch are independently valid: mounted near-vertical, roll is degenerate
+      // (gimbal lock) while pitch stays solid, so a missing roll must not suppress pitch.
+      attitude = isFinite(pitch) ? { roll: isFinite(roll) ? roll : null, pitch, source: src } : null
       ambientC = isFinite(temp) ? temp : null
       htuC = isFinite(ht) ? ht : null
       humidity = isFinite(hu) ? hu : null
+      shtC = isFinite(st) ? st : null
+      shtHumidity = isFinite(sh) ? sh : null
+      headingMag = isFinite(hd) ? hd : null
     }
   })
-  imuProc.on('error', () => { imuProc = null; attitude = null; ambientC = null; htuC = null; humidity = null })
-  imuProc.on('exit', () => { imuProc = null; attitude = null; ambientC = null; htuC = null; humidity = null; setTimeout(startImu, 5000) })
+  const clearImu = () => { imuProc = null; attitude = null; ambientC = null; htuC = null; humidity = null; shtC = null; shtHumidity = null; headingMag = null }
+  imuProc.on('error', clearImu)
+  imuProc.on('exit', () => { clearImu(); setTimeout(startImu, 5000) })
 }
 startImu()
 
@@ -1293,8 +2054,43 @@ startImu()
 // sentences and parses the acquisition state for the helm's GPS diagnostic view. ----
 let gpsProc = null
 const gpsRaw = []
-const gpsState = { alive: false, fix: 0, rmcValid: false, satsUsed: 0, satsInView: 0, hdop: null, antenna: null, sats: [], updated: 0 }
+// module/rf/port are filled from gps.py's UBX polls (#VER/#RF/#PORT); they stay null on a
+// receiver that speaks NMEA only, and the helm just omits those rows.
+const gpsState = { alive: false, fix: 0, rmcValid: false, satsUsed: 0, satsInView: 0, hdop: null, antenna: null, sats: [], updated: 0, module: null, rf: null, port: null, aiding: null }
 let gsvAccum = {}
+// "#TAG k=v|k=v" — '|' separated because values (firmware strings) contain spaces.
+function parseGpsMeta(line) {
+  const sp = line.indexOf(' ')
+  if (sp < 0) return
+  const tag = line.slice(0, sp)
+  const d = {}
+  for (const pair of line.slice(sp + 1).split('|')) {
+    const eq = pair.indexOf('=')
+    if (eq > 0) d[pair.slice(0, eq)] = pair.slice(eq + 1)
+  }
+  const num = (v) => (v != null && v !== '' && isFinite(Number(v)) ? Number(v) : null)
+  if (tag === '#VER') {
+    gpsState.module = { model: d.model || null, sw: d.sw || null, hw: d.hw || null, prot: d.prot || null, gnss: d.gnss ? d.gnss.split(';').filter(Boolean) : [] }
+  } else if (tag === '#RF') {
+    gpsState.rf = {
+      agc: num(d.agc), agcMax: num(d.agcMax) || 8191, noise: num(d.noise),
+      jam: d.jam || null, jamInd: num(d.jamInd), ant: d.ant || null, antPwr: d.antPwr || null,
+      updated: Date.now(),
+    }
+    // The antenna row in the acquisition block preferred the old ATGM336H's $GPTXT;
+    // UBX antenna status is better data when the module reports it.
+    if (d.ant && d.ant !== 'unknown') gpsState.antenna = d.ant
+  } else if (tag === '#PORT') {
+    gpsState.port = { dev: d.dev || null, baud: num(d.baud) }
+  } else if (tag === '#AID') {
+    // What startup aiding actually got injected — time, rough position, predicted orbits.
+    gpsState.aiding = {
+      time: d.time === '1', pos: d.pos === '1', ano: num(d.ano) || 0,
+      src: d.src && d.src !== 'none' ? d.src : null,
+      posAgeH: num(d.posAgeH), anoAgeD: num(d.anoAgeD),
+    }
+  }
+}
 function parseGps(line) {
   gpsRaw.push(line); while (gpsRaw.length > 40) gpsRaw.shift()
   const f = line.split('*')[0].split(',')
@@ -1330,7 +2126,8 @@ function startGps() {
       const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
       if (!line) continue
       if (line === 'READY') { gpsState.alive = true; continue }
-      if (line.startsWith('DEAD')) { gpsState.alive = false; continue }
+      if (line.startsWith('DEAD')) { gpsState.alive = false; gpsState.rf = null; continue }
+      if (line.startsWith('#')) { try { parseGpsMeta(line) } catch (e) {} continue }
       if (line.startsWith('$')) { gpsState.alive = true; try { parseGps(line) } catch (e) {} }
     }
   })

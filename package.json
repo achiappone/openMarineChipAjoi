@@ -10,6 +10,7 @@
     "deploy:app": "ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook -i ansible/hosts ansible/deploy_app.yml",
     "deploy:health": "ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook -i ansible/hosts ansible/deploy_app.yml -e app=pi-health",
     "deploy:helm": "ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook -i ansible/hosts ansible/deploy_helm.yml",
+    "maintain": "ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook -i ansible/hosts ansible/maintenance.yml",
     "helm:dev": "npm --prefix apps/helm run dev"
   },
   "engines": {

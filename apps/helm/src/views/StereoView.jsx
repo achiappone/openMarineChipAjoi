@@ -4,6 +4,11 @@ import {
   Button, Chip, Paper, Dialog, AppBar, Toolbar, Switch, FormControlLabel, Divider, LinearProgress, TextField, Tabs, Tab, CircularProgress,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
+import NmeaConsole from '../components/NmeaConsole'
+import { useDemo } from '../lib/demoMode'
+import { AttitudeCompassGauge } from './gauges'
+import { loadSoftkeyGeom, saveSoftkeyGeom } from '../components/Softkeys'
+import { useLiveControls } from '../lib/liveControls'
 import PlayArrowIcon from '@mui/icons-material/PlayArrow'
 import PauseIcon from '@mui/icons-material/Pause'
 import SkipNextIcon from '@mui/icons-material/SkipNext'
@@ -423,11 +428,543 @@ function TempHistoryGraph({ hist }) {
     </Box>
   )
 }
+// Mounting calibration for the accelerometer. Two independent things: which axis is
+// vertical (how the board is bolted in) and where zero is (how the boat sits). Both
+// apply live — imu.py re-reads the config as it runs — so you can hold the bracket in
+// place and watch the numbers, or re-zero after tilting the display.
+function ImuCalibrateDialog({ open, onClose }) {
+  const [d, setD] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState(null)
+  const [secs, setSecs] = useState(10)
+  const [mode, setMode] = useState('still')
+  const [step, setStep] = useState(1)
+  const [mag, setMag] = useState(null)
+  const [magSecs, setMagSecs] = useState(90)
+  const startMag = () => fetch(`${SVC}/api/imu/calibrate-mag?seconds=${magSecs}`, { method: 'POST' }).catch(() => {})
+  // Fire-and-forget: the poll above picks the new value up within 500ms, so waiting on
+  // the response would only make the buttons feel sticky.
+  const nudge = (key, delta) => {
+    const q = key === 'reset' ? 'reset=1' : `${key}=${delta}`
+    fetch(`${SVC}/api/imu/offset?${q}`, { method: 'POST' }).catch(() => {})
+  }
+  useEffect(() => {
+    if (!open) return
+    const load = () => {
+      fetch(`${SVC}/api/imu/orient`).then((r) => r.json()).then(setD).catch(() => {})
+      fetch(`${SVC}/api/imu/calibrate-mag`).then((r) => r.json()).then(setMag).catch(() => {})
+    }
+    load(); const t = setInterval(load, 500)   // live: the whole point is watching it move
+    return () => clearInterval(t)
+  }, [open])
+  const setAxis = async (axis) => {
+    setBusy(true); setResult(null)
+    try {
+      const r = await fetch(`${SVC}/api/imu/orient?axis=${axis}`, { method: 'POST' })
+      setResult(await r.json())
+    } catch (e) { setResult({ ok: false, error: 'could not reach the service' }) }
+    setBusy(false)
+  }
+  const teach = async (step) => {
+    setBusy(true); setResult(null)
+    try {
+      const r = await fetch(`${SVC}/api/imu/teach?step=${step}`, { method: 'POST' })
+      const j = await r.json()
+      setResult(j.ok && step === 'level' ? { ...j, note: 'Level captured. Now raise the bow end and capture step 2.' }
+        : j.ok ? { ...j, note: `Orientation taught from ${j.tiltDeg}° of tilt. Heel and trim are now correctly assigned.` } : j)
+    } catch (e) { setResult({ ok: false, error: 'could not reach the service' }) }
+    setBusy(false)
+  }
+  const level = async () => {
+    setBusy(true); setResult(null)
+    try {
+      const r = await fetch(`${SVC}/api/imu/level?seconds=${secs}&mode=${mode}`, { method: 'POST' })
+      setResult(await r.json())
+    } catch (e) { setResult({ ok: false, error: 'could not reach the service' }) }
+    setBusy(false)
+  }
+  const g = d?.gravity
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
+      <Box sx={{ p: 3 }}>
+        <Typography sx={{ fontWeight: 800, fontSize: '1.25rem', mb: 0.5 }}>Calibrate inclinometer</Typography>
+        <Typography sx={{ opacity: 0.7, fontSize: '0.9rem', mb: 2 }}>
+          Changes apply immediately — no restart. Safe to adjust while under way.
+        </Typography>
+
+        <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700 }}>LIVE GRAVITY VECTOR</Typography>
+        <Typography sx={{ fontFamily: 'monospace', fontSize: '1rem', mb: 2 }}>
+          {g ? `X ${g.x >= 0 ? '+' : ''}${g.x.toFixed(3)}   Y ${g.y >= 0 ? '+' : ''}${g.y.toFixed(3)}   Z ${g.z >= 0 ? '+' : ''}${g.z.toFixed(3)}` : 'waiting for the sensor…'}
+        </Typography>
+
+        <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700, mb: 0.75 }}>GUIDED SETUP</Typography>
+        <Typography sx={{ opacity: 0.7, fontSize: '0.85rem', mb: 1 }}>
+          You don't need to know which part of the board is “up” or “forward” — do these two
+          in order and it works the rest out, including which way is heel and which is trim.
+        </Typography>
+        <Stack spacing={1} sx={{ mb: 1 }}>
+          <Paper variant="outlined" sx={{ p: 1.25, display: 'flex', alignItems: 'center', gap: 2 }}>
+            <Box sx={{ flex: 1 }}>
+              <Typography sx={{ fontWeight: 700 }}>1 · Mounted and level</Typography>
+              <Typography sx={{ opacity: 0.65, fontSize: '0.82rem' }}>Board fixed where it will live, boat sitting level.</Typography>
+            </Box>
+            <Button variant="outlined" disabled={busy} onClick={() => teach('level')} sx={{ fontWeight: 700 }}>Capture</Button>
+          </Paper>
+          <Paper variant="outlined" sx={{ p: 1.25, display: 'flex', alignItems: 'center', gap: 2 }}>
+            <Box sx={{ flex: 1 }}>
+              <Typography sx={{ fontWeight: 700 }}>2 · Bow end raised <Box component="span" sx={{ opacity: 0.5, fontWeight: 400 }}>(optional)</Box></Typography>
+              <Typography sx={{ opacity: 0.65, fontSize: '0.82rem' }}>Tilt bow-up ~15° and capture — teaches which way is trim vs heel. Or skip it and nudge below.</Typography>
+            </Box>
+            <Button variant="outlined" disabled={busy} onClick={() => teach('bow')} sx={{ fontWeight: 700 }}>Capture</Button>
+          </Paper>
+        </Stack>
+
+        {/* Live preview: the same instrument that's on the Instruments page, so what you
+            adjust here is exactly what you'll be reading at the helm. */}
+        <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700, mb: 0.5 }}>LIVE PREVIEW</Typography>
+        <Stack direction="row" spacing={3} alignItems="center" sx={{ mb: 2 }}>
+          <Box sx={{ flex: 1 }}>
+            <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700, mb: 0.75 }}>NUDGE THE ZERO</Typography>
+            <Typography sx={{ opacity: 0.7, fontSize: '0.85rem', mb: 1.25 }}>
+              Adjust until the gauge reads what you know to be true — level at the dock, or
+              matching a spirit level. Takes effect as you press.
+            </Typography>
+            <Stack direction="row" spacing={1} sx={{ mb: 1.25 }}>
+              {[0.5, 1, 5].map((s) => (
+                <Chip key={s} label={`${s}°`} onClick={() => setStep(s)} color={step === s ? 'primary' : 'default'}
+                  variant={step === s ? 'filled' : 'outlined'} sx={{ cursor: 'pointer' }} />
+              ))}
+            </Stack>
+            {[['HEEL', 'dRoll'], ['TRIM', 'dPitch']].map(([lbl, key]) => (
+              <Stack key={key} direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+                <Typography sx={{ width: 46, fontSize: '0.75rem', opacity: 0.6, fontWeight: 700, letterSpacing: 1 }}>{lbl}</Typography>
+                <Button variant="outlined" disabled={busy} onClick={() => nudge(key, -step)} sx={{ minWidth: 54, fontWeight: 800, fontSize: '1.1rem' }}>−</Button>
+                <Button variant="outlined" disabled={busy} onClick={() => nudge(key, step)} sx={{ minWidth: 54, fontWeight: 800, fontSize: '1.1rem' }}>+</Button>
+                <Typography sx={{ opacity: 0.6, fontSize: '0.85rem', fontVariantNumeric: 'tabular-nums' }}>
+                  zero {Number((key === 'dRoll' ? d?.rollOffset : d?.pitchOffset) || 0).toFixed(2)}°
+                </Typography>
+              </Stack>
+            ))}
+            <Button size="small" variant="text" disabled={busy} onClick={() => nudge('reset')} sx={{ mt: 0.5 }}>Reset zero</Button>
+          </Box>
+          {/* Preview on the right, where your eye lands after pressing the buttons. */}
+          <Box sx={{ width: 260, height: 300, flexShrink: 0 }}>
+            <AttitudeCompassGauge
+              heading={d?.headingMag ?? null} cog={null}
+              roll={typeof d?.attitude?.roll === 'number' ? -d.attitude.roll : null}
+              pitch={typeof d?.attitude?.pitch === 'number' ? d.attitude.pitch : null} />
+          </Box>
+        </Stack>
+        {d?.frame ? (
+          <Typography sx={{ fontSize: '0.85rem', color: 'success.main', mb: 2 }}>
+            Orientation taught — heel and trim are resolved from the mounting, not guessed.
+          </Typography>
+        ) : (
+          <Typography sx={{ fontSize: '0.85rem', opacity: 0.6, mb: 2 }}>
+            Not taught yet — falling back to the single-axis choice below.
+          </Typography>
+        )}
+
+        <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700, mb: 0.75 }}>OR PICK THE UP AXIS MANUALLY</Typography>
+        <Typography sx={{ opacity: 0.7, fontSize: '0.85rem', mb: 1 }}>
+          Only needed if you skip the guided setup. Pick whichever reads closest to 0° / 0° with
+          the boat level; “unusable” means gravity lies along that axis, leaving heel undefined.
+        </Typography>
+        <Stack spacing={1} sx={{ mb: 2 }}>
+          {(d?.preview || []).map((p) => (
+            <Paper key={p.axis} variant="outlined"
+              onClick={() => !busy && p.usable && setAxis(p.axis)}
+              sx={{ p: 1.25, display: 'flex', alignItems: 'center', gap: 2, cursor: p.usable ? 'pointer' : 'not-allowed',
+                opacity: p.usable ? 1 : 0.45,
+                borderColor: d?.upAxis === p.axis ? 'primary.main' : undefined,
+                borderWidth: d?.upAxis === p.axis ? 2 : 1 }}>
+              <Chip size="small" label={p.axis} sx={{ fontFamily: 'monospace', fontWeight: 800 }} />
+              <Typography sx={{ flex: 1, fontVariantNumeric: 'tabular-nums' }}>
+                {p.usable ? `heel ${p.roll >= 0 ? '+' : ''}${p.roll}°   trim ${p.pitch >= 0 ? '+' : ''}${p.pitch}°` : 'unusable in this position'}
+              </Typography>
+              {d?.upAxis === p.axis ? <Chip size="small" color="primary" label="in use" /> : null}
+            </Paper>
+          ))}
+        </Stack>
+
+        {/* Compass calibration is a different sensor and a different job from the
+            accelerometer work above — hard/soft-iron correction, redone whenever the
+            module moves relative to the boat's steel. */}
+        <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700, mb: 0.75 }}>COMPASS (MAGNETOMETER)</Typography>
+        <Typography sx={{ opacity: 0.7, fontSize: '0.85rem', mb: 1 }}>
+          {mag?.calibration
+            ? `Calibrated: field ${mag.calibration.field ?? '—'} µT, residual ${mag.calibration.residualPct ?? '—'}%, coverage ${mag.calibration.coveragePct ?? '—'}%${mag.calibration.planar ? ' (2D fit)' : ''}.`
+            : 'Never calibrated — heading is unreliable until this is run.'}
+          {' '}Rotate the module through gentle figure-eights the whole time, covering as many
+          orientations as you can. Afloat, turn the boat through two full slow circles instead.
+        </Typography>
+        {mag?.running ? (
+          <Box sx={{ mb: 2 }}>
+            <LinearProgress variant="determinate" value={Math.min(100, (mag.elapsed / mag.seconds) * 100)} sx={{ height: 8, borderRadius: 4, mb: 0.75 }} />
+            <Typography sx={{ fontSize: '0.85rem', fontFamily: 'monospace', opacity: 0.75 }}>
+              {mag.elapsed}s / {mag.seconds}s — {(mag.lines || []).slice(-1)[0] || 'starting…'}
+            </Typography>
+          </Box>
+        ) : (
+          <Stack direction="row" spacing={1} sx={{ mb: 2 }} alignItems="center">
+            {[60, 90, 120].map((s) => (
+              <Chip key={s} label={`${s}s`} onClick={() => setMagSecs(s)} color={magSecs === s ? 'primary' : 'default'}
+                variant={magSecs === s ? 'filled' : 'outlined'} sx={{ cursor: 'pointer' }} />
+            ))}
+            <Button variant="contained" onClick={startMag} sx={{ fontWeight: 700 }}>Calibrate compass</Button>
+            {mag?.exit === 0 && !mag.running ? <Typography sx={{ fontSize: '0.85rem', color: 'success.main' }}>Done</Typography> : null}
+            {mag?.exit > 0 ? <Typography sx={{ fontSize: '0.85rem', color: 'error.main' }}>Failed — see detail below</Typography> : null}
+          </Stack>
+        )}
+        {(mag?.lines || []).length && !mag?.running ? (
+          <Box sx={{ bgcolor: 'rgba(0,0,0,0.45)', borderRadius: 1, p: 1, mb: 2, fontFamily: 'monospace',
+            fontSize: '0.78rem', maxHeight: 120, overflowY: 'auto', color: 'rgba(200,220,200,0.85)' }}>
+            {mag.lines.slice(-8).map((l, i) => <Box key={i} sx={{ whiteSpace: 'pre-wrap' }}>{l}</Box>)}
+          </Box>
+        ) : null}
+
+        <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700, mb: 0.75 }}>SET ZERO</Typography>
+        <ToggleButtonGroup exclusive size="small" value={mode} sx={{ mb: 1 }}
+          onChange={(_, v) => { if (v) { setMode(v); setSecs(v === 'moving' ? 60 : 10) } }}>
+          <ToggleButton value="still" sx={{ px: 2 }}>At rest</ToggleButton>
+          <ToggleButton value="moving" sx={{ px: 2 }}>Under way</ToggleButton>
+        </ToggleButtonGroup>
+        <Typography sx={{ opacity: 0.7, fontSize: '0.85rem', mb: 1 }}>
+          {mode === 'still'
+            ? 'Dock or flat calm. A few seconds is enough — if the boat moves during the capture it will be rejected rather than baked in.'
+            : 'Afloat or under way. Needs to span many wave periods so the roll averages to true level — 60s or more.'}
+          {' '}Current zero: heel {Number(d?.rollOffset || 0).toFixed(2)}°, trim {Number(d?.pitchOffset || 0).toFixed(2)}°.
+        </Typography>
+        <Stack direction="row" spacing={1} sx={{ mb: 1.5 }}>
+          {(mode === 'moving' ? [30, 60, 120] : [5, 10, 15]).map((s) => (
+            <Chip key={s} label={`${s}s`} onClick={() => setSecs(s)} color={secs === s ? 'primary' : 'default'}
+              variant={secs === s ? 'filled' : 'outlined'} sx={{ cursor: 'pointer' }} />
+          ))}
+          <Box sx={{ flex: 1 }} />
+          <Button variant="contained" disabled={busy} onClick={level} sx={{ fontWeight: 700 }}>
+            {busy ? <CircularProgress size={20} sx={{ color: 'inherit' }} /> : 'Capture level'}
+          </Button>
+        </Stack>
+
+        {result ? (
+          <Typography sx={{ fontSize: '0.9rem', color: result.ok === false ? 'error.main' : 'success.main', mb: 1 }}>
+            {result.ok === false ? `Failed — ${result.error}`
+              : result.warning ? `⚠ ${result.warning}`
+                : result.quality ? `Zero set from ${result.samples} samples — ${result.quality} (movement ±${result.movement.roll}° heel, ±${result.movement.pitch}° trim)`
+                  : result.note || 'Saved.'}
+          </Typography>
+        ) : null}
+
+        <Button variant="outlined" size="large" fullWidth onClick={onClose} sx={{ mt: 1, py: 1.25 }}>Done</Button>
+      </Box>
+    </Dialog>
+  )
+}
+// Encoder bench test. Two things to confirm before trusting a knob on a boat: that both
+// phases actually toggle cleanly, and that the quadrature sequence is legal. The invalid
+// count is the one that matters — it catches marginal logic levels, which is exactly the
+// risk of running a 5V-rated encoder at 3V.
+function EncoderTestPanel() {
+  const [e, setE] = useState(null)
+  useEffect(() => {
+    const load = () => fetch(`${SVC}/api/encoder`).then((r) => r.json()).then(setE).catch(() => {})
+    load(); const t = setInterval(load, 200)
+    return () => clearInterval(t)
+  }, [])
+  const reset = () => fetch(`${SVC}/api/encoder/reset`, { method: 'POST' }).catch(() => {})
+  const live = e && e.alive
+  const bits = (v) => (v == null ? '········' : v.toString(2).padStart(8, '0'))
+  const Lamp = ({ on, label }) => (
+    <Stack alignItems="center" spacing={0.5} sx={{ width: 60 }}>
+      <Box sx={{ width: 34, height: 34, borderRadius: '50%', bgcolor: on ? '#39d98a' : 'rgba(255,255,255,0.10)',
+        border: '2px solid', borderColor: on ? '#39d98a' : 'rgba(255,255,255,0.25)',
+        boxShadow: on ? '0 0 12px rgba(57,217,138,0.6)' : 'none' }} />
+      <Typography sx={{ fontSize: '0.75rem', fontWeight: 800, opacity: 0.8 }}>{label}</Typography>
+    </Stack>
+  )
+  return (
+    <Paper variant="outlined" sx={{ p: 1.75 }}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+        <Typography sx={{ fontWeight: 700, fontSize: '1.05rem' }}>Rotary encoder test</Typography>
+        <Chip size="small" label={live ? 'reading' : 'no reader'} color={live ? 'success' : 'default'}
+          variant={live ? 'filled' : 'outlined'} />
+        <Box sx={{ flex: 1 }} />
+        <Button size="small" variant="outlined" onClick={reset} sx={{ fontWeight: 700 }}>Reset counters</Button>
+      </Stack>
+      {!live ? (
+        <Typography sx={{ opacity: 0.7, fontSize: '0.9rem' }}>
+          The reader isn't running — either the MCP23017 isn't responding at 0x20, or python3/smbus2 is missing.
+        </Typography>
+      ) : (
+        <>
+          <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 1.5 }}>
+            <Lamp on={!!e.a} label="A" />
+            <Lamp on={!!e.b} label="B" />
+            <Box sx={{ flex: 1 }}>
+              <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700 }}>DETENTS</Typography>
+              <Typography sx={{ fontWeight: 800, fontSize: '2.2rem', lineHeight: 1.1 }}>
+                {e.det}
+                <Box component="span" sx={{ opacity: 0.45, fontSize: '1rem', fontWeight: 600 }}>  ({e.pos} counts)</Box>
+              </Typography>
+            </Box>
+            <Box sx={{ textAlign: 'right' }}>
+              <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700 }}>TURNING</Typography>
+              <Typography sx={{ fontWeight: 800, fontSize: '1.3rem' }}>
+                {e.hz > 0 ? (e.dir > 0 ? 'CW ▲' : e.dir < 0 ? 'CCW ▼' : '—') : 'idle'}
+              </Typography>
+            </Box>
+          </Stack>
+          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1, mb: 1.25 }}>
+            <GpsStat label="EDGES" value={e.edges} />
+            <GpsStat label="EDGES/SEC" value={e.hz} />
+            <GpsStat label="INVALID" value={e.invalid} color={e.invalid > 0 ? '#ff3b30' : '#39d98a'} />
+          </Box>
+          <Typography sx={{ fontFamily: 'monospace', fontSize: '0.8rem', opacity: 0.6, mb: 1 }}>
+            port A {bits(e.portA)}   port B {bits(e.portB)}
+          </Typography>
+          {/* Softkeys share this expander; showing them here makes one screen that
+              answers "is the control panel alive". */}
+          <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700, mb: 0.75 }}>SOFTKEYS</Typography>
+          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1, mb: 1 }}>
+            {[[2, '1'], [3, '2'], [4, '3'], [5, '4']].map(([pin, name]) => {
+              const b = (e.buttons || {})[pin]
+              const fresh = b && Date.now() - b.lastAt < 700
+              return (
+                <Box key={pin} sx={{ borderRadius: 1.5, px: 1.25, py: 1, textAlign: 'center',
+                  bgcolor: fresh ? 'rgba(57,217,138,0.28)' : 'rgba(255,255,255,0.05)',
+                  border: '1px solid', borderColor: fresh ? '#39d98a' : 'rgba(255,255,255,0.12)',
+                  transition: 'background-color 120ms linear' }}>
+                  <Typography sx={{ fontSize: '0.62rem', opacity: 0.55, letterSpacing: 1, fontWeight: 700 }}>
+                    KEY {name} · A{pin}
+                  </Typography>
+                  <Typography sx={{ fontWeight: 800, fontSize: '1.3rem', lineHeight: 1.2 }}>
+                    {b ? b.presses : 0}
+                    {b && b.longs ? <Box component="span" sx={{ fontSize: '0.8rem', opacity: 0.7 }}> +{b.longs}L</Box> : null}
+                  </Typography>
+                  <Typography sx={{ fontSize: '0.7rem', opacity: 0.6 }}>
+                    {b ? (b.last === 'long' ? 'long' : 'press') : 'not seen'}
+                  </Typography>
+                </Box>
+              )
+            })}
+          </Box>
+          <Typography sx={{ fontSize: '0.85rem', opacity: 0.75, mb: 1 }}>
+            Knob mode: <strong>{e.mode || '—'}</strong>{' '}
+            <Box component="span" sx={{ opacity: 0.6 }}>(key 4 cycles: {(e.modes || []).join(' → ')})</Box>
+          </Typography>
+          <Typography sx={{ fontSize: '0.85rem', opacity: 0.75 }}>
+            {e.edges === 0
+              ? 'Turn the knob — nothing has changed yet. If A and B stay dark with the knob turning, check power and that A/B land on GPA0/GPA1.'
+              : e.invalid === 0
+                ? `Clean: ${e.edges} edges, no illegal transitions. Both phases are reaching valid logic levels.`
+                : `${e.invalid} illegal transitions out of ${e.edges} edges — states are being missed. Suspect marginal logic levels (try 5V with dividers), bounce, or wiring.`}
+          </Typography>
+        </>
+      )}
+    </Paper>
+  )
+}
+function GpsStat({ label, value, color }) {
+  return (
+    <Box>
+      <Typography sx={{ fontSize: '0.6rem', opacity: 0.5, letterSpacing: 1, fontWeight: 700 }}>{label}</Typography>
+      <Typography sx={{ fontWeight: 800, fontSize: '1.1rem', color: color || 'inherit' }}>{value}</Typography>
+    </Box>
+  )
+}
+// AGC is the front end's gain, 0..agcMax. It normally drifts as the noise environment
+// moves; parked at the bottom of the range it means a strong in-band carrier is forcing
+// the gain down, which buries the satellites — the receiver is deaf, not broken.
+const AGC_PINNED_PCT = 15
+function GpsRfBlock({ rf, satsInView }) {
+  if (!rf || rf.agc == null) return null
+  const pct = Math.round((rf.agc / (rf.agcMax || 8191)) * 100)
+  const low = pct <= AGC_PINNED_PCT
+  const jamBad = rf.jam === 'warning' || rf.jam === 'critical'
+  const color = low || jamBad ? '#ff3b30' : '#39d98a'
+  return (
+    <Box sx={{ mt: 1.5 }}>
+      <Typography sx={{ opacity: 0.6, fontSize: '0.8rem', letterSpacing: 1, fontWeight: 700, mb: 0.75 }}>RF FRONT END</Typography>
+      <Stack direction="row" spacing={3} sx={{ flexWrap: 'wrap', rowGap: 1, alignItems: 'flex-start' }}>
+        <Box sx={{ minWidth: 132 }}>
+          <Typography sx={{ fontSize: '0.6rem', opacity: 0.5, letterSpacing: 1, fontWeight: 700 }}>AGC GAIN</Typography>
+          <Typography sx={{ fontWeight: 800, fontSize: '1.1rem', color }}>{rf.agc} <Box component="span" sx={{ opacity: 0.5, fontSize: '0.8rem', fontWeight: 600 }}>/ {rf.agcMax} · {pct}%</Box></Typography>
+          <Box sx={{ mt: 0.5, height: 5, borderRadius: 3, bgcolor: 'rgba(255,255,255,0.12)', overflow: 'hidden' }}>
+            <Box sx={{ width: `${Math.max(2, pct)}%`, height: '100%', bgcolor: color }} />
+          </Box>
+        </Box>
+        <GpsStat label="NOISE" value={rf.noise ?? '—'} />
+        <GpsStat label="JAMMING" value={`${rf.jam || '—'}${rf.jamInd != null ? ` · ${rf.jamInd}/255` : ''}`} color={jamBad ? '#ff3b30' : undefined} />
+        <GpsStat label="ANTENNA" value={rf.ant || '—'} />
+      </Stack>
+      {low && !satsInView ? (
+        <Typography sx={{ mt: 1, fontSize: '0.8rem', color: '#ff8f85' }}>
+          AGC is pinned at {pct}% — the front end has cut gain to the floor, which happens when a strong
+          in-band carrier (a clock harmonic from nearby electronics, measured here at ~1564 MHz) saturates
+          the input. The module is healthy; it's being deafened locally. Moving the antenna away from the
+          Pi, display and SDR is what changes this number.
+        </Typography>
+      ) : null}
+    </Box>
+  )
+}
+// ---- Config: helm behaviour that isn't hardware. Demo mode moved here from the
+// Instruments header so it can't be toggled by a stray tap underway. ----
+function ConfigPanel() {
+  const [demo, setDemo] = useDemo()
+  const [busy, setBusy] = useState('')
+  const [msg, setMsg] = useState(null)
+  const [askReboot, setAskReboot] = useState(false)
+  // Softkey geometry is shared with the rail through localStorage + an event, so the
+  // labels track the sliders while you drag them.
+  const [vol, setVol] = useState({ perStep: 3, accel: true })
+  useEffect(() => { fetch(`${SVC}/api/encoder/volcfg`).then((r) => r.json()).then(setVol).catch(() => {}) }, [])
+  const [sk, setSkState] = useState(loadSoftkeyGeom)
+  const setSk = (g) => { setSkState(g); saveSoftkeyGeom(g) }
+
+  const post = async (path, label) => {
+    setBusy(label); setMsg(null)
+    try {
+      const r = await fetch(`${SVC}${path}`, { method: 'POST' })
+      const j = await r.json().catch(() => ({}))
+      setMsg({ action: label, ...j })
+    } catch (e) {
+      setMsg({ action: label, ok: false, error: 'could not reach the stereo service' })
+    }
+    setBusy('')
+  }
+
+  const orbitText = (m) => {
+    if (!m.ok) return `Failed — ${m.error}`
+    if (m.skipped) return `Already current (${m.ageH}h old) — ${m.note}`
+    return `Updated — ${m.records} records covering ${m.days} days (${m.from} to ${m.to}). The receiver reloaded with today's.`
+  }
+
+  return (
+    <Stack spacing={1.5}>
+      <Typography sx={{ opacity: 0.6, fontSize: '0.85rem' }}>Helm display options.</Typography>
+      <Paper variant="outlined" sx={{ p: 2 }}>
+        <FormControlLabel
+          control={<Switch checked={demo} onChange={(e) => setDemo(e.target.checked)} />}
+          label={<Typography sx={{ fontWeight: 700, fontSize: '1.05rem' }}>Demo mode</Typography>}
+        />
+        <Typography sx={{ opacity: 0.7, fontSize: '0.9rem', mt: 0.5 }}>
+          Animates the gauges with synthetic data so the panel can be checked at the dock with
+          the engine off and no SignalK feed. Real sensors always show real values regardless —
+          GPS, heel/trim, heading and the I²C temperatures ignore this switch, so it can't
+          disguise a dead sensor as a working one.
+        </Typography>
+        <Typography sx={{ opacity: 0.55, fontSize: '0.85rem', mt: 1 }}>
+          Currently <strong>{demo ? 'ON — gauges are synthetic' : 'OFF — gauges follow live data'}</strong>.
+          The Instruments panel shows a matching “demo” or “live” badge in its corner.
+        </Typography>
+      </Paper>
+
+      <Paper variant="outlined" sx={{ p: 2 }}>
+        <Typography sx={{ fontWeight: 700, fontSize: '1.05rem', mb: 0.5 }}>Volume knob feel</Typography>
+        <Typography sx={{ opacity: 0.7, fontSize: '0.9rem', mb: 1 }}>
+          How many full turns take the volume from silent to maximum. Currently
+          <strong> {Number(vol.turns || 2).toFixed(2)} turns</strong> ({vol.detentsPerRev || 24} detents per turn).
+        </Typography>
+        <Slider size="small" value={Number(vol.turns || 2)} min={0.5} max={6} step={0.25} marks
+          valueLabelDisplay="auto"
+          onChange={(_, v) => setVol({ ...vol, turns: v })}
+          onChangeCommitted={(_, v) => fetch(`${SVC}/api/encoder/volcfg?turns=${v}`, { method: 'POST' }).catch(() => {})} />
+        <FormControlLabel
+          control={<Switch checked={vol.accel !== false}
+            onChange={(e) => { setVol({ ...vol, accel: e.target.checked }); fetch(`${SVC}/api/encoder/volcfg?accel=${e.target.checked ? 1 : 0}`, { method: 'POST' }).catch(() => {}) }} />}
+          label={<Typography sx={{ fontSize: '0.95rem' }}>Speed-up on fast spins (max 2×)</Typography>} />
+      </Paper>
+
+      <Paper variant="outlined" sx={{ p: 2 }}>
+        <Typography sx={{ fontWeight: 700, fontSize: '1.05rem', mb: 0.5 }}>Softkey alignment</Typography>
+        <Typography sx={{ opacity: 0.7, fontSize: '0.9rem', mb: 1.5 }}>
+          Line the on-screen labels up with the physical buttons on the bezel. Adjust until each
+          label sits beside its button — the labels move live as you drag.
+        </Typography>
+        <FormControlLabel
+          control={<Switch checked={!!sk.enabled} onChange={(e) => setSk({ ...sk, enabled: e.target.checked })} />}
+          label={<Typography sx={{ fontWeight: 700 }}>Show softkey labels</Typography>} />
+        {sk.enabled ? (
+          <Box sx={{ mt: 1 }}>
+            <FormControlLabel
+              control={<Switch checked={sk.knobPopup !== false} onChange={(e) => setSk({ ...sk, knobPopup: e.target.checked })} />}
+              label={<Typography sx={{ fontSize: '0.95rem' }}>Circular popup while turning the knob</Typography>} />
+            {[['First key from top', 'top', 2, 45, '%'], ['Spacing between keys', 'spacing', 8, 30, '%'], ['Label width', 'width', 60, 200, 'px'],
+              ['Knob popup — from right', 'knobRight', 0, 60, '%'], ['Knob popup — from top', 'knobTop', 10, 95, '%'], ['Knob dial size', 'knobSize', 140, 460, 'px']].map(([label, key, min, max, unit]) => (
+              <Box key={key} sx={{ mb: 1 }}>
+                <Typography sx={{ fontSize: '0.85rem', opacity: 0.75 }}>{label}: {sk[key]}{unit}</Typography>
+                <Slider size="small" value={sk[key]} min={min} max={max}
+                  onChange={(_, v) => setSk({ ...sk, [key]: v })} />
+              </Box>
+            ))}
+          </Box>
+        ) : null}
+      </Paper>
+
+      <Paper variant="outlined" sx={{ p: 2 }}>
+        <Typography sx={{ fontWeight: 700, fontSize: '1.05rem', mb: 0.5 }}>GPS assistance data</Typography>
+        <Typography sx={{ opacity: 0.7, fontSize: '0.9rem', mb: 1.5 }}>
+          Downloads 14 days of predicted satellite orbits so the GPS starts fast with no internet.
+          Needs a connection now — do this at the dock, or while the phone is tethered, before a trip.
+        </Typography>
+        <Button variant="contained" size="large" fullWidth disabled={!!busy}
+          onClick={() => post('/api/orbits/refresh', 'orbits')} sx={{ py: 1.5, fontWeight: 700 }}>
+          {busy === 'orbits' ? <CircularProgress size={22} sx={{ color: 'inherit' }} /> : 'Refresh orbit data'}
+        </Button>
+        {msg && msg.action === 'orbits' ? (
+          <Typography sx={{ mt: 1.25, fontSize: '0.9rem', color: msg.ok ? 'success.main' : 'error.main' }}>
+            {orbitText(msg)}
+          </Typography>
+        ) : null}
+      </Paper>
+
+      <Paper variant="outlined" sx={{ p: 2 }}>
+        <Typography sx={{ fontWeight: 700, fontSize: '1.05rem', mb: 0.5 }}>Power</Typography>
+        <Typography sx={{ opacity: 0.7, fontSize: '0.9rem', mb: 1.5 }}>
+          Sleep blanks the screen only — everything keeps running, and a touch wakes it. Use it at
+          night so the display isn't ruining your night vision.
+        </Typography>
+        <Stack direction="row" spacing={1.5}>
+          <Button variant="outlined" size="large" fullWidth disabled={!!busy}
+            onClick={() => post('/api/system/sleep', 'sleep')} sx={{ py: 1.5, fontWeight: 700 }}>
+            Sleep screen
+          </Button>
+          <Button variant="outlined" size="large" color="error" fullWidth disabled={!!busy}
+            onClick={() => setAskReboot(true)} sx={{ py: 1.5, fontWeight: 700 }}>
+            Reboot
+          </Button>
+        </Stack>
+      </Paper>
+
+      {/* Reboot takes navigation, the stereo and the plotter down for a minute — never
+          on a single tap. */}
+      <Dialog open={askReboot} onClose={() => setAskReboot(false)} maxWidth="xs" fullWidth>
+        <Box sx={{ p: 3 }}>
+          <Typography sx={{ fontWeight: 800, fontSize: '1.2rem', mb: 1 }}>Reboot the boat computer?</Typography>
+          <Typography sx={{ opacity: 0.8, fontSize: '0.95rem', mb: 2 }}>
+            Instruments, the chart plotter, GPS and the stereo all stop for about a minute while it
+            restarts. Don't do this while navigating.
+          </Typography>
+          <Stack direction="row" spacing={1.5}>
+            <Button variant="outlined" size="large" fullWidth onClick={() => setAskReboot(false)} sx={{ py: 1.5 }}>Cancel</Button>
+            <Button variant="contained" color="error" size="large" fullWidth sx={{ py: 1.5, fontWeight: 700 }}
+              onClick={() => { setAskReboot(false); post('/api/system/reboot', 'reboot') }}>Reboot now</Button>
+          </Stack>
+        </Box>
+      </Dialog>
+    </Stack>
+  )
+}
 function SensorsPanel({ active }) {
   const [data, setData] = useState(null)
   const [gps, setGps] = useState(null)
   const [gpsd, setGpsd] = useState(null)
   const [err, setErr] = useState(false)
+  const [calOpen, setCalOpen] = useState(false)
+  const [order, setOrder] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('helm.sensorOrder')) || [] } catch (e) { return [] }
+  })
   const histRef = useRef([])
   const [, force] = useState(0)
   const load = async () => {
@@ -451,7 +988,23 @@ function SensorsPanel({ active }) {
   }, [active])
   if (err && !data) return <Typography sx={{ opacity: 0.6 }}>Can't reach the stereo service.</Typography>
   if (!data) return <Typography sx={{ opacity: 0.6 }}>Scanning I²C bus…</Typography>
-  const devices = data.devices || []
+  // Order: whatever you've arranged with the arrows, else ICM20948 first (it drives the
+  // gauges and owns the calibration workflow), then bus order. Devices that appear later
+  // — a sensor plugged in after you sorted — land at the end rather than vanishing.
+  const devices = [...(data.devices || [])].sort((a, b) => {
+    const ia = order.indexOf(a.addr), ib = order.indexOf(b.addr)
+    if (ia >= 0 || ib >= 0) return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib)
+    return a.name === 'ICM20948' ? -1 : b.name === 'ICM20948' ? 1 : 0
+  })
+  const moveDevice = (addr, dir) => {
+    const cur = devices.map((x) => x.addr)
+    const i = cur.indexOf(addr), j = i + dir
+    if (i < 0 || j < 0 || j >= cur.length) return
+    const next = [...cur]
+    next[i] = cur[j]; next[j] = cur[i]
+    setOrder(next)
+    try { localStorage.setItem('helm.sensorOrder', JSON.stringify(next)) } catch (e) { /* private mode */ }
+  }
   const pos = gps?.position?.value
   const fix = !!(pos && typeof pos.latitude === 'number')
   const satsIV = gps?.gnss?.satellitesInView?.value?.count ?? gps?.gnss?.satellitesInView?.count ?? null
@@ -463,8 +1016,8 @@ function SensorsPanel({ active }) {
       <Paper variant="outlined" sx={{ p: 1.75, display: 'flex', alignItems: 'center', gap: 2 }}>
         <Chip label="UART" size="small" sx={{ fontFamily: 'monospace', fontWeight: 700 }} />
         <Box sx={{ flex: 1, minWidth: 0 }}>
-          <Typography sx={{ fontWeight: 700 }}>ATGM336H GPS</Typography>
-          <Typography sx={{ fontSize: '0.85rem', opacity: 0.7 }}>position · /dev/serial0 @ 9600{satsIV != null ? `  ·  ${satsIV} sats in view${satsUsed != null ? `, ${satsUsed} used` : ''}` : ''}</Typography>
+          <Typography sx={{ fontWeight: 700 }}>{gpsd?.module?.model ? `${gpsd.module.model} GPS` : 'GPS'}{gpsd?.module?.sw ? <Box component="span" sx={{ opacity: 0.5, fontWeight: 400, ml: 1, fontSize: '0.85rem' }}>{gpsd.module.sw}</Box> : null}</Typography>
+          <Typography sx={{ fontSize: '0.85rem', opacity: 0.7 }}>position · {gpsd?.port?.dev ? `${gpsd.port.dev} @ ${gpsd.port.baud}` : 'uart5 · pins 32/33'}{satsIV != null ? `  ·  ${satsIV} sats in view${satsUsed != null ? `, ${satsUsed} used` : ''}` : ''}</Typography>
         </Box>
         {fix ? <Typography sx={{ fontVariantNumeric: 'tabular-nums', fontWeight: 700, fontSize: '0.9rem' }}>{Math.abs(pos.latitude).toFixed(4)}°{pos.latitude >= 0 ? 'N' : 'S'} {Math.abs(pos.longitude).toFixed(4)}°{pos.longitude >= 0 ? 'E' : 'W'}</Typography> : null}
         <Chip size="small" label={fix ? 'fix' : gps ? 'acquiring' : 'no data'} color={fix ? 'success' : gps ? 'warning' : 'default'} variant={fix ? 'filled' : 'outlined'} />
@@ -477,10 +1030,32 @@ function SensorsPanel({ active }) {
             <Chip size="small" label={gpsd.fix >= 1 ? 'FIX' : gpsd.alive ? 'searching' : 'no data'} color={gpsd.fix >= 1 ? 'success' : gpsd.alive ? 'warning' : 'default'} variant={gpsd.fix >= 1 ? 'filled' : 'outlined'} />
           </Stack>
           <Stack direction="row" spacing={3} sx={{ mb: 1.5, flexWrap: 'wrap', rowGap: 1 }}>
-            {[['In view', gpsd.satsInView], ['Used', gpsd.satsUsed], ['HDOP', gpsd.hdop ?? '—'], ['Antenna', gpsd.antenna || '—']].map(([l, v]) => (
-              <Box key={l}><Typography sx={{ fontSize: '0.6rem', opacity: 0.5, letterSpacing: 1, fontWeight: 700 }}>{l}</Typography><Typography sx={{ fontWeight: 800, fontSize: '1.1rem' }}>{v}</Typography></Box>
+            {/* 99.99 is the receiver's "no fix, not computed" sentinel for HDOP, not a
+                real geometry score — show it as nothing rather than as a huge number. */}
+            {[['In view', gpsd.satsInView], ['Used', gpsd.satsUsed],
+              ['HDOP', gpsd.hdop != null && gpsd.hdop < 99 ? gpsd.hdop : '—'],
+              ['Antenna', gpsd.antenna || '—']].map(([l, v]) => (
+              <GpsStat key={l} label={l} value={v} />
             ))}
           </Stack>
+          {gpsd.module ? (
+            <Box sx={{ mb: 1.5 }}>
+              <Typography sx={{ opacity: 0.6, fontSize: '0.8rem', letterSpacing: 1, fontWeight: 700, mb: 0.75 }}>MODULE</Typography>
+              <Stack direction="row" spacing={3} sx={{ flexWrap: 'wrap', rowGap: 1 }}>
+                <GpsStat label="RECEIVER" value={gpsd.module.model || '—'} />
+                <GpsStat label="FIRMWARE" value={gpsd.module.sw || '—'} />
+                <GpsStat label="PROTOCOL" value={gpsd.module.prot || '—'} />
+                <GpsStat label="HARDWARE" value={gpsd.module.hw || '—'} />
+                <GpsStat label="PORT" value={gpsd.port ? `${gpsd.port.dev} @ ${gpsd.port.baud}` : '—'} />
+              </Stack>
+              {gpsd.module.gnss && gpsd.module.gnss.length ? (
+                <Stack direction="row" spacing={0.75} sx={{ mt: 1, flexWrap: 'wrap', rowGap: 0.75 }}>
+                  {gpsd.module.gnss.map((g) => <Chip key={g} size="small" label={g} variant="outlined" sx={{ fontSize: '0.7rem', height: 22 }} />)}
+                </Stack>
+              ) : null}
+            </Box>
+          ) : null}
+          <GpsRfBlock rf={gpsd.rf} satsInView={gpsd.satsInView} />
           {gpsd.sats && gpsd.sats.filter((s) => s.snr).length > 0 ? (
             <Box sx={{ display: 'flex', alignItems: 'flex-end', gap: 0.5, height: 64, mb: 1 }}>
               {gpsd.sats.filter((s) => s.snr).sort((a, b) => b.snr - a.snr).map((s, i) => (
@@ -491,22 +1066,36 @@ function SensorsPanel({ active }) {
               ))}
             </Box>
           ) : (
-            <Typography sx={{ opacity: 0.55, fontSize: '0.85rem', mb: 1 }}>No satellite signal yet — the module is healthy (raw NMEA streaming below), but the antenna isn't receiving. It needs a clear view of the sky, away from the Pi/screen/SDR.</Typography>
+            <Typography sx={{ opacity: 0.55, fontSize: '0.85rem', mb: 1 }}>No satellite signal yet — raw NMEA is streaming below, so the receiver itself is alive; nothing is being heard on the antenna.</Typography>
           )}
-          <Box sx={{ bgcolor: 'rgba(0,0,0,0.45)', borderRadius: 1, p: 1, fontFamily: 'monospace', fontSize: '0.72rem', lineHeight: 1.5, maxHeight: 150, overflowY: 'auto', color: 'rgba(150,220,150,0.9)' }}>
-            {(gpsd.raw || []).map((l, i) => <Box key={i} sx={{ whiteSpace: 'nowrap' }}>{l}</Box>)}
-            {(!gpsd.raw || gpsd.raw.length === 0) && <Box sx={{ opacity: 0.5 }}>waiting for NMEA…</Box>}
-          </Box>
+          {/* Same decoder as the Instruments GPS popup — plain English by default, raw
+              sentences one tap away. */}
+          <NmeaConsole lines={gpsd.raw} maxHeight={220} />
         </Paper>
       )}
-      {devices.map((d) => (
+      <ImuCalibrateDialog open={calOpen} onClose={() => setCalOpen(false)} />
+      <EncoderTestPanel />
+      {devices.map((d, i) => (
         <Paper key={d.addr} variant="outlined" sx={{ p: 1.75, display: 'flex', alignItems: 'center', gap: 2 }}>
+          {/* Arrange the list to match how you actually use it — order persists locally. */}
+          <Stack sx={{ mr: -0.5 }}>
+            <IconButton size="small" disabled={i === 0} onClick={() => moveDevice(d.addr, -1)}
+              sx={{ p: 0.25, fontSize: '0.9rem', lineHeight: 1 }} aria-label="move up">▲</IconButton>
+            <IconButton size="small" disabled={i === devices.length - 1} onClick={() => moveDevice(d.addr, 1)}
+              sx={{ p: 0.25, fontSize: '0.9rem', lineHeight: 1 }} aria-label="move down">▼</IconButton>
+          </Stack>
           <Chip label={d.addr} size="small" sx={{ fontFamily: 'monospace', fontWeight: 700 }} />
           <Box sx={{ flex: 1, minWidth: 0 }}>
             <Typography sx={{ fontWeight: 700 }}>{d.name}{d.extra ? <Box component="span" sx={{ opacity: 0.5, fontWeight: 400, ml: 1, fontSize: '0.85rem' }}>{d.extra}</Box> : null}</Typography>
             <Typography sx={{ fontSize: '0.85rem', opacity: 0.7 }}>{d.role || '—'}</Typography>
           </Box>
           {(d.tempC != null || d.value) ? <Typography sx={{ fontVariantNumeric: 'tabular-nums', fontWeight: 700, opacity: 0.9, fontSize: '0.9rem' }}>{tempStr(d)}</Typography> : null}
+          {/* Calibration belongs on the sensor it calibrates, not buried in a menu. */}
+          {(d.name === 'ICM20948' || d.name === 'ADXL345') ? (
+            <Button size="small" variant="outlined" onClick={() => setCalOpen(true)} sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
+              Calibrate
+            </Button>
+          ) : null}
           <Chip size="small" label={d.running ? 'running' : d.name === 'unknown' ? 'detected' : 'idle'}
             color={d.running ? 'success' : d.name === 'unknown' ? 'default' : 'warning'} variant={d.running ? 'filled' : 'outlined'} />
         </Paper>
@@ -884,7 +1473,10 @@ export function SettingsDialog({ open, onClose, settings, onChange, tab = 'fm', 
         <Tab value="trip" label="Trip" />
         <Tab value="network" label="Network" />
         <Tab value="sensors" label="Sensors" />
-        <Tab value="system" label="System" />
+        <Tab value="config" label="Config" />
+        {/* Tab value stays "system" — it keys the panel and any saved tab state; only
+            the label changed, since this screen is live monitoring, not settings. */}
+        <Tab value="system" label="Monitor" />
       </Tabs>
       {/* Scrolls by drag/flick, but no visible scrollbar — it's a touchscreen, and
           Chromium's default bar looks like a relic. */}
@@ -989,6 +1581,7 @@ export function SettingsDialog({ open, onClose, settings, onChange, tab = 'fm', 
         {tab === 'trip' && <TripPanel active={tab === 'trip'} />}
         {tab === 'network' && <NetworkPanel active={tab === 'network'} />}
         {tab === 'sensors' && <SensorsPanel active={tab === 'sensors'} />}
+        {tab === 'config' && <ConfigPanel />}
         {tab === 'system' && <SystemPanel active={tab === 'system'} />}
         {tab === 'aux' && (
           <Stack spacing={2.5}>
@@ -1012,6 +1605,9 @@ export function SettingsDialog({ open, onClose, settings, onChange, tab = 'fm', 
 }
 
 function StereoView({ big = false }) {
+  // Same live values the knob dial uses, so the big readouts move with your hand
+  // instead of waiting for the 2s state poll.
+  const live = useLiveControls()
   const [s, setS] = useState(null)
 
   const [btDevOpen, setBtDevOpen] = useState(false)
@@ -1118,7 +1714,7 @@ function StereoView({ big = false }) {
         </IconButton>
         <Typography sx={{ fontWeight: 800, lineHeight: 1, fontVariantNumeric: 'tabular-nums',
           fontSize: big ? '6rem' : '2.4rem', minWidth: big ? 340 : 150, textAlign: 'center' }}>
-          {s.fm.freq.toFixed(1)}
+          {(live.freq != null ? live.freq : s.fm.freq).toFixed(1)}
           <Typography component="span" sx={{ ml: 1, opacity: 0.55, fontSize: big ? '1.8rem' : '1rem' }}>FM</Typography>
         </Typography>
         <IconButton onClick={() => c.seek(1)} sx={{ border: '2px solid rgba(255,255,255,0.2)', p: big ? 2 : 1, '&:hover': { borderColor: 'primary.main' } }}>
@@ -1143,8 +1739,12 @@ function StereoView({ big = false }) {
           </Typography>
         )}
       </Box>
-      <Slider size={big ? 'medium' : 'small'} value={s.fm.freq} min={FM_MIN} max={FM_MAX} step={0.1}
-        onChange={(_, v) => c.tune(v)} valueLabelDisplay="auto" sx={{ mt: big ? 1 : 0 }} />
+      <Slider size={big ? 'medium' : 'small'} value={live.freq != null ? live.freq : s.fm.freq} min={FM_MIN} max={FM_MAX} step={0.1}
+        onChange={(_, v) => c.tune(v)} valueLabelDisplay="auto"
+        sx={{ mt: big ? 1 : 0,
+          // Glide between detents like the knob dial does, instead of stepping.
+          '& .MuiSlider-thumb': { transition: 'left 90ms linear' },
+          '& .MuiSlider-track': { transition: 'width 90ms linear' } }} />
     </Box>
   ) : (
     <Typography align="center" sx={{ py: big ? 6 : 1.5, opacity: 0.7, fontSize: big ? '1.4rem' : undefined }}>
@@ -1163,7 +1763,7 @@ function StereoView({ big = false }) {
       </Stack>
       <Stack direction="row" spacing={big ? 1.5 : 0.75} justifyContent={big ? 'flex-start' : 'center'} flexWrap="wrap" useFlexGap>
         {s.fm.presets.map((p, i) => (
-          <PresetCard key={`${p.freq}-${i}`} preset={p} big={big} active={Math.abs(p.freq - s.fm.freq) < 0.05}
+          <PresetCard key={`${p.freq}-${i}`} preset={p} big={big} active={Math.abs(p.freq - (live.freq != null ? live.freq : s.fm.freq)) < 0.05}
             onSelect={() => c.selectPreset(i)} onDelete={() => setDeleteConfirm({ i, preset: p })} />
         ))}
         {s.fm.presets.length === 0 && <Typography sx={{ opacity: 0.5 }}>No presets — tune a station and tap Save</Typography>}

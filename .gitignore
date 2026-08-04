@@ -6,3 +6,14 @@
 
 # node deps (installed on the Pi, never committed)
 node_modules/
+
+# Python bytecode (generated on the Pi and the Mac)
+__pycache__/
+*.pyc
+
+# Runtime state written on the Pi, never repo content
+apps/stereo-service/magcal.json
+apps/stereo-service/imuconfig.json
+apps/stereo-service/gpsfix.json
+apps/stereo-service/wifipos.json
+apps/stereo-service/mga-offline.ubx

@@ -1,0 +1,5 @@
+# Stable name for the GPS UART.
+# dtoverlay=uart5 (GPIO12/13) is a PL011 at MMIO fe201a00; the ttyAMA number the kernel
+# assigns depends on probe order (Bluetooth's PL011 already registers as ttyAMA1), so
+# match on the hardware address instead and always expose it as /dev/gps.
+SUBSYSTEM=="tty", KERNELS=="fe201a00.serial", SYMLINK+="gps", GROUP="dialout", MODE="0660"

@@ -10,6 +10,9 @@ import Instruments from './views/Instruments'
 import { createRadioClient } from './stereo/stereoClient'
 import { VOL_MAX } from './stereo/stereoControl'
 import useSignalKStatus from './hooks/useSignalKStatus'
+import SoftkeyRail, { SoftkeyProvider, useSoftkeyInput, loadSoftkeyGeom } from './components/Softkeys'
+import { KnobDial } from './components/KnobOverlay'
+import { LiveControlsProvider } from './lib/liveControls'
 
 // Root-absolute so it works both on the Pi (same origin :3000) and via the Vite
 // dev proxy on the laptop.
@@ -81,6 +84,40 @@ function VolumeSlider({ value, muted, onCommit }) {
   )
 }
 
+
+// The plotter is an iframe (Freeboard-SK, same origin), so we can reach into it. It
+// renders with OpenLayers, which zooms on wheel events over the map viewport — that's a
+// more robust hook than guessing at internal APIs that change between releases.
+function zoomPlotter(dir) {
+  try {
+    const f = document.querySelector('iframe[title^="Plotter"]')
+    const doc = f && (f.contentDocument || (f.contentWindow && f.contentWindow.document))
+    if (!doc) return
+    const el = doc.querySelector('.ol-viewport') || doc.querySelector('canvas') || doc.body
+    const r = el.getBoundingClientRect()
+    el.dispatchEvent(new WheelEvent('wheel', {
+      deltaY: dir > 0 ? -120 : 120, clientX: r.width / 2, clientY: r.height / 2,
+      bubbles: true, cancelable: true, view: f.contentWindow,
+    }))
+  } catch (e) { /* cross-origin or not loaded yet */ }
+}
+
+// Presets, not tracks: on the stereo screens these keys step through the saved FM
+// presets and wrap around, which is what a car head unit does with the same buttons.
+function stepPreset(dir, st) {
+  try {
+    if (!st) return
+    const presets = (st.fm && st.fm.presets) || []
+    if (!presets.length) return
+    const cur = presets.findIndex((p) => Math.abs(p.freq - st.fm.freq) < 0.05)
+    const next = cur < 0 ? (dir > 0 ? 0 : presets.length - 1)
+      : (cur + dir + presets.length) % presets.length
+    fetch(`${SVC}/api/preset`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ i: next }),
+    })
+  } catch (e) { /* service down */ }
+}
+
 const TABS = [
   { id: 'plotter', label: 'Plotter' },
   { id: 'instruments', label: 'Instruments' },
@@ -150,7 +187,7 @@ function Surface({ rect, children }) {
 
 const validTab = (id) => (TABS.some((t) => t.id === id) ? id : 'plotter')
 
-export default function App() {
+function AppShell() {
   // Initial tab from the URL hash (e.g. #all), so a view is deep-linkable and the
   // boot kiosk can open straight into a chosen page.
   const [tab, setTabState] = useState(() => validTab(location.hash.replace('#', '')))
@@ -192,8 +229,121 @@ export default function App() {
     stereoCtl.current && stereoCtl.current.setMuted(m)
   }
 
+  // Physical softkeys: top key always cycles screens (long-press goes home) unless the
+  // active view has claimed it. Everything else is per-view.
+  const tabRef = useRef(tab)
+  tabRef.current = tab
+  const stereoRef = useRef(null)
+  stereoRef.current = stereo
+  // Knob-driven volume, applied optimistically. The service is authoritative, but its
+  // state is polled every 2s — far too slow to follow a knob, which is why turning it
+  // looked dead until you stopped.
+  const [knobVol, setKnobVol] = useState(null)
+  const knobVolAt = useRef(0)
+  const [knobFreq, setKnobFreq] = useState(null)
+  const knobFreqAt = useRef(0)
+  // Live knob activity for the popup: the value being changed, which way, and a timer
+  // that hides it shortly after you stop turning.
+  const [knobLive, setKnobLive] = useState({ value: null, dir: 0, at: 0 })
+  const [knobTurning, setKnobTurning] = useState(false)
+  const knobHide = useRef(null)
+  const bumpKnob = (value, dir) => {
+    setKnobLive({ value, dir, at: Date.now() })
+    setKnobTurning(true)
+    clearTimeout(knobHide.current)
+    knobHide.current = setTimeout(() => setKnobTurning(false), 900)
+  }
+  const { flash, mode } = useSoftkeyInput({
+    onVolume: (v) => {
+      setKnobVol((prev) => { bumpKnob(v, prev == null ? 0 : Math.sign(v - prev)); return v })
+      knobVolAt.current = Date.now()
+    },
+    onTune: (f) => {
+      setKnobFreq((prev) => { bumpKnob(f, prev == null ? 0 : Math.sign(f - prev)); return f })
+      knobFreqAt.current = Date.now()
+    },
+    onDelta: (d) => bumpKnob(knobLive.value, Math.sign(d)),
+    onScreenCycle: () => setTab((t) => TABS[(TABS.findIndex((x) => x.id === t) + 1) % TABS.length].id),
+    onHome: () => setTab('instruments'),
+    onKey: (idx) => {
+      // Global fallbacks for slots 2 and 3 while no view has claimed them.
+      const t = tabRef.current
+      if (idx !== 1 && idx !== 2) return
+      if (t === 'plotter') return zoomPlotter(idx === 1 ? 1 : -1)
+      if (t === 'stereo' || t === 'all' || t === 'split') return stepPreset(idx === 1 ? 1 : -1, stereoRef.current)
+    },
+  })
+  useEffect(() => {
+    if (knobVol == null) return
+    if (stereo && stereo.volume === knobVol) { setKnobVol(null); return }
+    const t = setTimeout(() => setKnobVol(null), 2500)   // safety: never stick
+    return () => clearTimeout(t)
+  }, [knobVol, stereo && stereo.volume])
+  const shownVol = knobVol != null ? knobVol : (stereo ? stereo.volume : 0)
+  useEffect(() => {
+    if (knobFreq == null) return
+    if (stereo && stereo.fm && Math.abs(stereo.fm.freq - knobFreq) < 0.01) { setKnobFreq(null); return }
+    const t = setTimeout(() => setKnobFreq(null), 4000)
+    return () => clearTimeout(t)
+  }, [knobFreq, stereo && stereo.fm && stereo.fm.freq])
+  const shownFreq = knobFreq != null ? knobFreq : (stereo && stereo.fm ? stereo.fm.freq : null)
+
+  const [geom, setGeom] = useState(loadSoftkeyGeom)
+  // Per-screen defaults so the rail is never blank. A view can override any slot by
+  // registering its own with useSoftkeys(); these are what show until it does.
+  const KNOB = { volume: 'VOLUME', tune: 'FM TUNE', nav: 'NAVIGATE', value: 'ADJUST' }
+  // The knob key always shows the value it controls, not just while turning — the point
+  // of a knob is knowing where it is before you touch it.
+  const knobKey = mode === 'volume'
+    ? { label: `${shownVol}`, sub: 'VOLUME' }
+    : mode === 'tune'
+      ? { label: shownFreq != null ? shownFreq.toFixed(1) : '—',
+          sub: (stereo && stereo.nowPlaying && stereo.nowPlaying.title && stereo.nowPlaying.title !== 'FM Radio')
+            ? stereo.nowPlaying.title : 'FM' }
+      : { label: 'KNOB', sub: KNOB[mode] || mode }
+  // While the knob is turning, slot 4 becomes the dial — same space, so nothing else on
+  // screen moves, and the label it replaces is the one describing that very knob.
+  const knobValue = mode === 'volume' ? shownVol : mode === 'tune' ? shownFreq : knobLive.value
+  const knobSub = mode === 'tune' && stereo && stereo.nowPlaying && stereo.nowPlaying.title !== 'FM Radio'
+    ? stereo.nowPlaying.title : null
+  const skOverrides = []
+  const skDefaults = (
+    tab === 'plotter' ? [{ label: 'VIEW', sub: 'hold = home' }, { label: 'ZOOM +' }, { label: 'ZOOM −' }]
+      : tab === 'stereo' || tab === 'all' || tab === 'split' ? [{ label: 'VIEW', sub: 'hold = home' }, { label: 'NEXT' }, { label: 'PREV' }]
+        : [{ label: 'VIEW', sub: 'hold = home' }, { label: '—' }, { label: '—' }]
+  )
+  useEffect(() => {
+    const on = (e) => setGeom(e.detail || loadSoftkeyGeom())
+    window.addEventListener('helm-softkeys-geom', on)
+    return () => window.removeEventListener('helm-softkeys-geom', on)
+  }, [])
+
+  const liveCtl = { volume: knobVol, freq: knobFreq, mode, turning: knobTurning }
   return (
-    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <LiveControlsProvider value={liveCtl}>
+    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column',
+      // Keep content clear of the rail so labels never sit on top of a gauge.
+      pr: geom.enabled ? `${geom.width}px` : 0 }}>
+      <SoftkeyRail geom={geom} flash={flash} defaults={skDefaults} overrides={skOverrides} />
+      {/* Big dial in the bottom-right corner while the knob is turning. Large enough to
+          read at a glance from the wheel, and it fades out rather than snapping so it
+          doesn't feel like a popup fighting for attention. */}
+      {geom.knobPopup !== false ? (
+        <Box sx={{
+          // Sunk into the corner: half of it hangs off the right edge so two quadrants
+          // show. Always present — a knob you can't see the position of is a knob you
+          // have to test by ear — but dimmed until you touch it.
+          position: 'fixed', zIndex: 1500, pointerEvents: 'none',
+          width: `min(${geom.knobSize || 260}px, 46vh)`,
+          right: `calc(min(${geom.knobSize || 260}px, 46vh) / -2)`,
+          bottom: `calc(min(${geom.knobSize || 260}px, 46vh) / -6)`,
+          opacity: knobTurning ? 1 : 0.32,
+          transition: knobTurning ? 'opacity 70ms linear' : 'opacity 500ms ease-out',
+        }}>
+          <KnobDial mode={mode} value={knobValue} dir={knobLive.dir} sub={knobSub}
+            presets={(stereo && stereo.fm && stereo.fm.presets) || []} />
+        </Box>
+      ) : null}
       {/* Surfaces — all mounted, positioned per tab */}
       <Box sx={{ position: 'relative', flex: 1, minHeight: 0, overflow: 'hidden' }}>
         <Surface rect={L.plotter}><EmbeddedApp src={FREEBOARD} title="Plotter (Freeboard-SK)" /></Surface>
@@ -228,15 +378,17 @@ export default function App() {
 
 
       {/* Page buttons — bottom bar, right-aligned; global MUTE centered. */}
-      <Box sx={{ flexShrink: 0, bgcolor: 'background.paper', borderTop: '1px solid rgba(255,255,255,0.12)' }}>
+      <Box sx={{ flexShrink: 0, bgcolor: 'background.paper', borderTop: '1px solid rgba(255,255,255,0.12)',
+        // Clear the two quadrants of dial poking into this corner.
+        pr: geom.knobPopup !== false ? `calc(min(${geom.knobSize || 260}px, 46vh) / 2 + 10px)` : 0 }}>
         <Stack direction="row" alignItems="center">
           {/* Global volume — wide, filling the left up to the MUTE button. */}
           <Stack direction="row" alignItems="center" spacing={1.5} sx={{ flex: 1, minWidth: 0, pl: 3, pr: 2 }}>
             {muted ? <VolumeOffIcon sx={{ color: 'error.main' }} /> : <VolumeUpIcon sx={{ opacity: 0.7 }} />}
-            <VolumeSlider value={stereo ? stereo.volume : 0} muted={muted}
+            <VolumeSlider value={shownVol} muted={muted}
               onCommit={(v) => stereoCtl.current && stereoCtl.current.setVolume(v)} />
             <Typography sx={{ width: 30, textAlign: 'right', fontWeight: 700, fontSize: '1.1rem', fontVariantNumeric: 'tabular-nums' }}>
-              {muted ? 'M' : (stereo ? stereo.volume : 0)}
+              {muted ? 'M' : shownVol}
             </Typography>
           </Stack>
           {/* MUTE button */}
@@ -273,5 +425,16 @@ export default function App() {
         </Stack>
       </Box>
     </Box>
+    </LiveControlsProvider>
+  )
+}
+
+
+// Provider wraps the shell so any view can register its four key labels.
+export default function App() {
+  return (
+    <SoftkeyProvider>
+      <AppShell />
+    </SoftkeyProvider>
   )
 }

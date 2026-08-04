@@ -1,0 +1,181 @@
+---
+# Routine maintenance for the boat Pi. One playbook, tag-selected chores, so recurring
+# jobs live in version control instead of accumulating as one-off shell scripts.
+#
+#   npm run maintain -- --tags gps-orbits     # refresh AssistNow predictive orbits
+#   npm run maintain -- --list-tags           # see what chores exist
+#   npm run maintain                          # run everything tagged 'routine'
+#
+#   ansible-playbook -i ansible/hosts ansible/maintenance.yml --tags gps-orbits
+#
+# Add a chore by giving it its own tag (plus 'routine' if it is safe to run unattended).
+- hosts: pi
+  gather_facts: no
+  vars_files:
+    - config.yml
+  vars:
+    stereo_dir: "{{ remote_apps_path }}/stereo-service"
+    # Credentials live on the Pi only — the chipcode is a per-device secret and must
+    # never land in this repo.
+    assistnow_creds: /home/pi/assistnow-credentials.json
+    orbit_file: "{{ stereo_dir }}/mga-offline.ubx"
+    orbit_tmp: /tmp/mga-offline.new.ubx
+
+  tasks:
+    # ---------------------------------------------------------------- gps-orbits ----
+    # AssistNow Predictive Orbits: 14 days of predicted satellite positions in one
+    # download. gps.py injects that day's records at every startup, so the receiver
+    # warm-starts with no internet — which is the point on the ICW. Re-run this
+    # whenever there's a tether, and definitely before a trip.
+    - name: Check the AssistNow credentials exist
+      ansible.builtin.stat:
+        path: "{{ assistnow_creds }}"
+      register: creds_stat
+      tags: [gps-orbits, routine]
+
+    - name: Explain how to fix missing credentials
+      ansible.builtin.fail:
+        msg: >-
+          {{ assistnow_creds }} is missing. The device needs one-time ZTP registration:
+          POST {"token": "<device profile token>", "messages": {"UBX-SEC-UNIQID": "<hex>",
+          "UBX-MON-VER": "<hex>"}} to https://api.thingstream.io/ztp/assistnow/credentials
+          and save the reply there.
+      when: not creds_stat.stat.exists
+      tags: [gps-orbits, routine]
+
+    # The free Predictive Orbits tier is quota-limited (HTTP 403003). Each download
+    # already covers 14 days, so refreshing a recent file buys nothing and can lock you
+    # out when it matters. Override with: -e force_orbits=true
+    - name: Check how old the current orbit data is
+      ansible.builtin.stat:
+        path: "{{ orbit_file }}"
+      register: orbit_stat
+      tags: [gps-orbits, routine]
+
+    - name: Decide whether a download is warranted
+      ansible.builtin.set_fact:
+        orbit_needed: >-
+          {{ force_orbits | default(false) | bool
+             or not orbit_stat.stat.exists
+             or (orbit_stat.stat.mtime | int) < ((lookup('pipe', 'date +%s') | int) - 43200) }}
+      tags: [gps-orbits, routine]
+
+    - name: Skip note
+      ansible.builtin.debug:
+        msg: >-
+          Orbit data is {{ ((lookup('pipe', 'date +%s') | int) - (orbit_stat.stat.mtime | int)) // 3600 }}h
+          old and still covers 14 days — skipping to preserve the free download quota.
+          Force with: -e force_orbits=true
+      when: not (orbit_needed | bool)
+      tags: [gps-orbits, routine]
+
+    - name: Read the chipcode
+      ansible.builtin.slurp:
+        src: "{{ assistnow_creds }}"
+      register: creds_raw
+      no_log: true
+      when: orbit_needed | bool
+      tags: [gps-orbits, routine]
+
+    - name: Download 14 days of predictive orbits
+      # no_log: the chipcode is in the URL. `utime` is deliberately not requested —
+      # time assistance is only valid when fetched, and this file is replayed for days;
+      # gps.py injects time from the Pi's own clock instead.
+      ansible.builtin.get_url:
+        url: >-
+          https://assistnow.services.u-blox.com/GetAssistNowData.ashx?chipcode={{
+          (creds_raw.content | b64decode | from_json).chipcode }}&gnss=gps,gal,bds,glo&data=uporb_14,ualm
+        dest: "{{ orbit_tmp }}"
+        mode: "0644"
+        force: true
+        timeout: 60
+      no_log: true
+      register: orbit_dl
+      when: orbit_needed | bool
+      tags: [gps-orbits, routine]
+
+    # Validate BEFORE overwriting the good file. A captive-portal login page or a
+    # truncated download would otherwise replace working aiding data with garbage.
+    - name: Validate the download and count records per day
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import struct, sys, collections
+            blob = open(sys.argv[1], "rb").read()
+            if len(blob) < 10000 or not blob.startswith(b"\xb5\x62"):
+                sys.exit("not UBX data (%d bytes) - captive portal or truncated download?" % len(blob))
+            days, i = collections.Counter(), 0
+            while True:
+                i = blob.find(b"\xb5\x62", i)
+                if i < 0 or i + 8 > len(blob):
+                    break
+                ln = struct.unpack("<H", blob[i+4:i+6])[0]
+                if i + 6 + ln + 2 > len(blob):
+                    break
+                if (blob[i+2], blob[i+3]) == (0x13, 0x20) and ln >= 8:
+                    p = blob[i+6:i+6+ln]
+                    days["20%02d-%02d-%02d" % (p[4], p[5], p[6])] += 1
+                i += 6 + ln + 2
+            if not days:
+                sys.exit("no MGA-ANO orbit records found")
+            print("%d bytes, %d days, %d records" % (len(blob), len(days), sum(days.values())))
+            for d in sorted(days):
+                print("  %s  %d" % (d, days[d]))
+          - "{{ orbit_tmp }}"
+      register: orbit_check
+      changed_when: false
+      when: orbit_needed | bool
+      tags: [gps-orbits, routine]
+
+    - name: Install the new orbit data
+      ansible.builtin.copy:
+        src: "{{ orbit_tmp }}"
+        dest: "{{ orbit_file }}"
+        remote_src: true
+        owner: pi
+        group: pi
+        mode: "0644"
+      when: orbit_needed | bool
+      tags: [gps-orbits, routine]
+
+    - name: Restart stereo-service so gps.py injects today's records
+      ansible.builtin.systemd:
+        name: stereo-service
+        state: restarted
+      become: true
+      when: orbit_needed | bool
+      tags: [gps-orbits, routine]
+
+    - name: Wait for the GPS pipeline to come back
+      ansible.builtin.pause:
+        seconds: 16
+      when: orbit_needed | bool
+      tags: [gps-orbits, routine]
+
+    - name: Read back what the receiver actually got
+      ansible.builtin.uri:
+        url: http://localhost:8082/api/gps
+        return_content: true
+      register: gps_api
+      failed_when: false
+      when: orbit_needed | bool
+      tags: [gps-orbits, routine]
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          {{ orbit_check.stdout_lines }}
+          | injected now: {{ (gps_api.json.aiding | default({})).ano | default('unknown') }} records
+          (time={{ (gps_api.json.aiding | default({})).time | default('?') }},
+          pos={{ (gps_api.json.aiding | default({})).pos | default('?') }})
+      when: orbit_needed | bool
+      tags: [gps-orbits, routine]
+
+    - name: Remove the temp download
+      ansible.builtin.file:
+        path: "{{ orbit_tmp }}"
+        state: absent
+      when: orbit_needed | bool
+      tags: [gps-orbits, routine]

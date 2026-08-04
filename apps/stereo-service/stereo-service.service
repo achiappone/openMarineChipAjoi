@@ -7,6 +7,14 @@ ExecStart=/usr/bin/node /home/pi/apps/stereo-service/server.js
 # Album art: ART_ONLINE=0 disables the iTunes lookup (offline behaviour test).
 # ART_CACHE=0 also bypasses the on-disk cover cache.
 Environment=ART_ONLINE=0
+# GPS startup aiding: a rough position lets the receiver skip most of a cold-start
+# search. Dania Beach, FL — declared to the module at +/-100 km, so it can never be
+# mistaken for a fix. Only used until the first real fix, which gps.py then persists
+# to gpsfix.json and prefers from then on.
+Environment=GPS_HOME=26.05,-80.14
+# AssistNow Offline (predicted orbits, good for days from one download) needs a free
+# u-blox token. Unset = that layer no-ops; time/position aiding still runs.
+#Environment=GPS_ASSIST_TOKEN=
 Restart=on-failure
 RestartSec=2
 User=pi

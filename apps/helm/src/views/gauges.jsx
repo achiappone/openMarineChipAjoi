@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react'
 // Lightweight SVG marine gauges. No chart library — plain SVG, updated at the
 // SignalK hook's ~4Hz, so they cost a fraction of the KIP webapp they replace.
 // All are theme-dark and render a graceful empty state (needle at min / "—").
@@ -267,8 +268,9 @@ export function WindGauge({ angle, speed, label = 'APP WIND', unit = 'kn' }) {
   )
 }
 
-// Inclinometer / artificial horizon from the ADXL345: heel (roll) tilts the horizon,
-// trim (pitch) shifts it up/down. Fixed boat reference in the centre; numbers below.
+// Inclinometer / artificial horizon from the accelerometer's gravity vector (ICM20948,
+// or ADXL345 as fallback): heel (roll) tilts the horizon, trim (pitch) shifts it up/down.
+// Fixed boat reference in the centre; numbers below.
 export function InclinometerGauge({ roll, pitch, label = 'HEEL / TRIM' }) {
   const has = roll != null && isFinite(roll)
   const r = has ? roll : 0
@@ -311,6 +313,157 @@ export function InclinometerGauge({ roll, pitch, label = 'HEEL / TRIM' }) {
       <text x={cx} y={cy + R + 30} dx="-58" textAnchor="middle" fontSize="12" fill={DIM} fontFamily="inherit">HEEL{has ? (r < 0 ? ' P' : ' S') : ''}</text>
       <text x={cx} y={cy + R + 30} dx="58" textAnchor="middle" fontSize="15" fontWeight="700" fill={TXT} fontFamily="inherit">{has ? `${p >= 0 ? '+' : ''}${Math.round(p)}°` : ''}</text>
       <text x={cx} y={cy + R + 30} dx="58" dy="14" textAnchor="middle" fontSize="11" fill={DIM} fontFamily="inherit">TRIM</text>
+    </svg>
+  )
+}
+
+// Combined attitude + heading instrument. Heading, heel and trim all come from the one
+// ICM20948, and in use they answer a single question — how is the boat sitting, and
+// where is it pointing — so they share one dial: a rotating compass card around an
+// artificial horizon. Same idea as an aircraft HSI, and it buys a much bigger horizon
+// than two half-height gauges could.
+export function AttitudeCompassGauge({ heading, cog, roll, pitch, label = 'HEADING', bezel = null, onBezel }) {
+  const hasH = heading != null && isFinite(heading)
+  const svgRef = useRef(null)
+  const hasBez = bezel != null && isFinite(bezel)
+  // Drag anywhere on the dial to spin the bezel, like turning the ring on a hand
+  // bearing compass. The pointer angle is a screen angle; the bezel is stored as a
+  // compass bearing, so the current heading has to be added back in.
+  const dragTo = (e) => {
+    if (!onBezel || !svgRef.current) return
+    const r = svgRef.current.getBoundingClientRect()
+    const px = (e.touches ? e.touches[0].clientX : e.clientX) - (r.left + r.width / 2)
+    const py = (e.touches ? e.touches[0].clientY : e.clientY) - (r.top + r.height * 0.45)
+    const screenDeg = (Math.atan2(px, -py) * 180) / Math.PI
+    onBezel(((screenDeg + (hasH ? heading : 0)) % 360 + 360) % 360)
+  }
+  const [dragging, setDragging] = useState(false)
+  const hasR = roll != null && isFinite(roll)
+  const r = hasR ? roll : 0
+  const p = pitch != null && isFinite(pitch) ? pitch : 0
+  const cx = 132, cy = 142, R = 88, HR = 46       // dial radius, horizon radius
+  const rot = hasH ? -heading : 0
+  const off = Math.max(-46, Math.min(46, p * 2.2))
+  const SKY = '#1e5f80', SEA = '#0a1c14', HLINE = '#e8eef2'
+  const heelColor = Math.abs(r) >= 25 ? RED : Math.abs(r) >= 15 ? AMBER : GREEN
+
+  const ticks = []
+  for (let d = 0; d < 360; d += 10) {
+    const major = d % 30 === 0
+    const [x1, y1] = polar(cx, cy, R, d - 90)
+    const [x2, y2] = polar(cx, cy, R - (major ? 10 : 6), d - 90)
+    ticks.push(<line key={d} x1={x1} y1={y1} x2={x2} y2={y2} stroke={DIM} strokeWidth={major ? 2.5 : 1.4} />)
+  }
+  const card = ['N', 'E', 'S', 'W']
+  return (
+    <svg ref={svgRef} viewBox="0 0 264 310" preserveAspectRatio="xMidYMid meet"
+      style={{ width: '100%', height: '100%', display: 'block', touchAction: 'none', cursor: onBezel ? 'grab' : 'default' }}
+      onPointerDown={(e) => { if (!onBezel) return; setDragging(true); e.currentTarget.setPointerCapture(e.pointerId); dragTo(e) }}
+      onPointerMove={(e) => { if (dragging) dragTo(e) }}
+      onPointerUp={() => setDragging(false)}
+      onPointerCancel={() => setDragging(false)}>
+      <defs><clipPath id="horizonClip"><circle cx={cx} cy={cy} r={HR} /></clipPath></defs>
+
+      {/* artificial horizon: tilts with heel, slides with trim */}
+      <g clipPath="url(#horizonClip)">
+        {hasR ? (
+          <g transform={`rotate(${-r} ${cx} ${cy}) translate(0 ${off})`}>
+            <rect x={cx - 220} y={cy - 280} width={440} height={280} fill={SKY} />
+            <rect x={cx - 220} y={cy} width={440} height={280} fill={SEA} />
+            <line x1={cx - 220} y1={cy} x2={cx + 220} y2={cy} stroke={HLINE} strokeWidth={2.5} />
+            {[-20, -10, 10, 20].map((t) => (
+              <line key={t} x1={cx - 14} y1={cy - t * 2.2} x2={cx + 14} y2={cy - t * 2.2} stroke="rgba(255,255,255,0.45)" strokeWidth={1.4} />
+            ))}
+          </g>
+        ) : <rect x={cx - HR} y={cy - HR} width={HR * 2} height={HR * 2} fill="rgba(255,255,255,0.04)" />}
+      </g>
+      <circle cx={cx} cy={cy} r={HR} fill="none" stroke={TRACK} strokeWidth={2} />
+
+      {/* fixed boat reference over the horizon */}
+      <line x1={cx - 24} y1={cy} x2={cx - 9} y2={cy} stroke={AMBER} strokeWidth={3.5} />
+      <line x1={cx + 9} y1={cy} x2={cx + 24} y2={cy} stroke={AMBER} strokeWidth={3.5} />
+      <circle cx={cx} cy={cy} r={3.2} fill={AMBER} />
+
+      {/* rotating compass card */}
+      <circle cx={cx} cy={cy} r={R + 6} fill="none" stroke={TRACK} strokeWidth={2} />
+      <g transform={`rotate(${rot} ${cx} ${cy})`}>
+        {ticks}
+        {card.map((c, i) => {
+          const [x, y] = polar(cx, cy, R - 22, i * 90 - 90)
+          return <text key={c} x={x} y={y + 7} textAnchor="middle" fontSize="21" fontWeight="800" fill={c === 'N' ? RED : TXT} fontFamily="inherit">{c}</text>
+        })}
+        {cog != null && isFinite(cog) && (() => { const [x, y] = polar(cx, cy, R - 6, cog - 90); return <circle cx={x} cy={y} r={5.5} fill={GREEN} /> })()}
+      </g>
+
+      {/* Rotating bezel: a target bearing you set by hand. Drawn on the card so it turns
+          with the compass — steer until it sits under the lubber line and you're on
+          course. Drag anywhere on the dial to move it. */}
+      {hasBez && (
+        <g transform={`rotate(${((bezel - (hasH ? heading : 0)) % 360 + 360) % 360} ${cx} ${cy})`}>
+          <polygon points={`${cx},${cy - R - 7} ${cx - 11},${cy - R + 15} ${cx + 11},${cy - R + 15}`}
+            fill="none" stroke={TEAL} strokeWidth={3} strokeLinejoin="round" />
+          <line x1={cx} y1={cy - R + 15} x2={cx} y2={cy - HR - 4} stroke={TEAL} strokeWidth={2} opacity={0.55} />
+        </g>
+      )}
+
+      {/* fixed lubber line at the top */}
+      <polygon points={`${cx},${cy - R - 9} ${cx - 9},${cy - R + 9} ${cx + 9},${cy - R + 9}`} fill={BLUE} />
+
+      {/* readouts below the dial */}
+      <text x={cx} y={cy + R + 52} textAnchor="middle" fontSize="42" fontWeight="800" fill={TXT} fontFamily="inherit">
+        {hasH ? `${Math.round(heading)}°` : '—'}
+      </text>
+      <text x={cx} y={cy + R + 70} textAnchor="middle" fontSize="15" letterSpacing="2" fontWeight="700" fill="rgba(255,255,255,0.75)" fontFamily="inherit">
+        {label}{cog != null && isFinite(cog) ? ' · COG ●' : ''}
+      </text>
+      <text x={cx - 95} y={cy + R + 36} textAnchor="middle" fontSize="27" fontWeight="800" fill={hasR ? heelColor : DIM} fontFamily="inherit">
+        {hasR ? `${Math.abs(Math.round(r))}°` : '—'}
+      </text>
+      <text x={cx - 95} y={cy + R + 54} textAnchor="middle" fontSize="14" fontWeight="700" fill="rgba(255,255,255,0.75)" fontFamily="inherit">
+        HEEL{hasR ? (r < 0 ? ' P' : ' S') : ''}
+      </text>
+      <text x={cx + 95} y={cy + R + 36} textAnchor="middle" fontSize="27" fontWeight="800" fill={TXT} fontFamily="inherit">
+        {pitch != null && isFinite(pitch) ? `${p >= 0 ? '+' : ''}${Math.round(p)}°` : '—'}
+      </text>
+      <text x={cx + 95} y={cy + R + 54} textAnchor="middle" fontSize="14" fontWeight="700" fill="rgba(255,255,255,0.75)" fontFamily="inherit">TRIM</text>
+
+      {/* Bezel controls and readout. Off-course is the number that matters when steering:
+          signed shortest turn back to the mark, so "12 P" means come 12 degrees to port. */}
+      {onBezel && (() => {
+        const err = hasBez && hasH ? (((bezel - heading + 540) % 360) - 180) : null
+        return (
+          <g>
+            {/* Mark and off-course live at the very top, clear of the dial — the error
+                text used to sit right where the bezel marker parks when you're on
+                course, so it collided exactly when you most wanted to read it. */}
+            {/* Mark and off-course share one line above the dial. Below the readouts it
+                fell outside the canvas and got clipped; inside the dial it collides with
+                the S cardinal and the bezel marker. Up here there is clear space. */}
+            {/* Two short lines rather than one long one: a single line grew wide enough
+                to run under the corner buttons whenever the off-course figure appeared. */}
+            <text x={cx} y={16} textAnchor="middle" fontSize="15" letterSpacing="0.5" fontWeight="800"
+              fill={hasBez ? TEAL : 'rgba(255,255,255,0.6)'} fontFamily="inherit">
+              {hasBez ? `MARK ${Math.round(bezel)}°` : 'SET MARK'}
+            </text>
+            {hasBez && err != null && (
+              <text x={cx} y={36} textAnchor="middle" fontSize="20" fontWeight="800"
+                fill={Math.abs(err) <= 5 ? GREEN : Math.abs(err) <= 20 ? AMBER : RED} fontFamily="inherit">
+                {Math.abs(err) < 1 ? 'ON MARK' : `${Math.abs(Math.round(err))}° ${err < 0 ? 'PORT' : 'STBD'}`}
+              </text>
+            )}
+            {/* tap targets: set to current heading, and clear. Bigger than they look —
+                these get pressed with a thumb on a moving boat. */}
+            <g style={{ cursor: 'pointer' }} onPointerDown={(e) => { e.stopPropagation(); if (hasH) onBezel(heading) }}>
+              <rect x={0} y={2} width={52} height={30} rx={7} fill="rgba(255,255,255,0.10)" />
+              <text x={26} y={22} textAnchor="middle" fontSize="15" fontWeight="800" fill={TEAL} fontFamily="inherit">SET</text>
+            </g>
+            <g style={{ cursor: 'pointer' }} onPointerDown={(e) => { e.stopPropagation(); onBezel(null) }}>
+              <rect x={212} y={2} width={52} height={30} rx={7} fill="rgba(255,255,255,0.10)" />
+              <text x={238} y={22} textAnchor="middle" fontSize="15" fontWeight="800" fill="rgba(255,255,255,0.7)" fontFamily="inherit">CLR</text>
+            </g>
+          </g>
+        )
+      })()}
     </svg>
   )
 }
