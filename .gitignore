@@ -17,3 +17,6 @@ apps/stereo-service/imuconfig.json
 apps/stereo-service/gpsfix.json
 apps/stereo-service/wifipos.json
 apps/stereo-service/mga-offline.ubx
+
+# WiFi/OTA credentials for the ESP32 firmware (copy secrets.h.example)
+firmware/battery-monitor/secrets.h

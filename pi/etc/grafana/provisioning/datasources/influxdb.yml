@@ -1,0 +1,20 @@
+# Signal K writes here via signalk-to-influxdb2. The token must match the one
+# configured in the Signal K plugin settings.
+apiVersion: 1
+
+datasources:
+  - name: SignalK
+    uid: signalk   # referenced by house-battery.json
+    type: influxdb
+    access: proxy
+    url: http://localhost:8086
+    jsonData:
+      version: Flux
+      organization: boat
+      defaultBucket: signalk
+      httpMode: POST
+    secureJsonData:
+      # Replace with the InfluxDB API token. Do not commit a real token.
+      token: $INFLUX_TOKEN
+    isDefault: true
+    editable: false
